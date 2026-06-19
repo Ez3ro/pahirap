@@ -1,38 +1,72 @@
 import { NAV_ITEMS } from "../lib/nav"
 
-export default function Sidebar({ view, onChange, email, onSignOut }) {
+export default function Sidebar({ view, onChange, email, onSignOut, open, onClose }) {
+  function handleNav(key) {
+    onChange(key)
+    onClose()
+  }
+
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-gray-800 bg-gray-950 p-4">
-      <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Budget Tracker</h1>
+    <>
+      {/* Backdrop — only visible on mobile when sidebar is open */}
+      {open && (
+        <div
+          className="fixed inset-0 z-20 bg-black/60 md:hidden"
+          onClick={onClose}
+          aria-hidden
+        />
+      )}
 
-      <nav className="flex flex-1 flex-col gap-1">
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.key}
-            onClick={() => onChange(item.key)}
-            className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
-              view === item.key
-                ? "bg-blue-600 text-white"
-                : "text-gray-300 hover:bg-gray-800"
-            }`}
-          >
-            <span aria-hidden>{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="mt-4 border-t border-gray-800 pt-4">
-        <p className="truncate px-3 text-xs text-gray-500" title={email}>
-          {email}
-        </p>
+      <aside
+        className={`
+          fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r border-gray-800 bg-gray-950 p-4
+          transition-transform duration-300 ease-in-out
+          ${open ? "translate-x-0" : "-translate-x-full"}
+          md:relative md:w-56 md:translate-x-0 md:transition-none
+        `}
+      >
+        {/* Close button — mobile only */}
         <button
-          onClick={onSignOut}
-          className="mt-2 w-full rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"
+          onClick={onClose}
+          className="absolute right-3 top-3 rounded-lg p-1.5 text-gray-400 hover:bg-gray-800 md:hidden"
+          aria-label="Close menu"
         >
-          Sign out
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+          </svg>
         </button>
-      </div>
-    </aside>
+
+        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Budget Tracker</h1>
+
+        <nav className="flex flex-1 flex-col gap-1">
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.key}
+              onClick={() => handleNav(item.key)}
+              className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
+                view === item.key
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-300 hover:bg-gray-800"
+              }`}
+            >
+              <span aria-hidden>{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="mt-4 border-t border-gray-800 pt-4">
+          <p className="truncate px-3 text-xs text-gray-500" title={email}>
+            {email}
+          </p>
+          <button
+            onClick={onSignOut}
+            className="mt-2 w-full rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-200 hover:bg-gray-800"
+          >
+            Sign out
+          </button>
+        </div>
+      </aside>
+    </>
   )
 }

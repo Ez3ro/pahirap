@@ -67,8 +67,7 @@ export default function Income({
     })),
   ].sort((a, b) => (a.dateISO < b.dateISO ? 1 : -1))
 
-  async function handleSaveSettings(event) {
-    event.preventDefault()
+  async function handleSaveSettings() {
     await onSaveSettings({ periodA: Number(periodA) || 0, periodB: Number(periodB) || 0 })
     setEditing(false)
   }
@@ -159,10 +158,7 @@ export default function Income({
       )}
 
       {/* Salary settings */}
-      <form
-        onSubmit={handleSaveSettings}
-        className="rounded-xl border border-gray-700 bg-gray-800 p-4"
-      >
+      <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
         <h3 className="mb-1 font-semibold text-gray-100">Salary settings</h3>
         <p className="mb-4 text-sm text-gray-400">
           Enter your take-home pay for each half of the month.
@@ -201,7 +197,8 @@ export default function Income({
           {editing ? (
             <>
               <button
-                type="submit"
+                type="button"
+                onClick={handleSaveSettings}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
               >
                 Save
@@ -229,7 +226,7 @@ export default function Income({
             </>
           )}
         </div>
-      </form>
+      </div>
 
       {/* History: recorded paydays + skipped ones */}
       <div>

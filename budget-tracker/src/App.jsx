@@ -18,6 +18,7 @@ export default function App() {
 
   // Which sidebar section is showing.
   const [view, setView] = useState("dashboard")
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const [transactions, setTransactions] = useState([])
   const [salarySettings, setSalarySettings] = useState(null)
@@ -313,11 +314,24 @@ export default function App() {
         onChange={setView}
         email={session.user.email}
         onSignOut={signOut}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
 
       <main className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto">
-          <h2 className="mb-6 text-2xl font-bold text-gray-100">{activeTitle}</h2>
+          <div className="mb-6 flex items-center gap-3">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="rounded-lg p-2 text-gray-400 hover:bg-gray-800 md:hidden"
+              aria-label="Open menu"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            <h2 className="text-2xl font-bold text-gray-100">{activeTitle}</h2>
+          </div>
 
           {error && (
             <div className="mb-4 rounded-lg border border-red-900 bg-red-950 p-3 text-sm text-red-300">
