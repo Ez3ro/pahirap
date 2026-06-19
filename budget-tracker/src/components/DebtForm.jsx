@@ -9,7 +9,8 @@ export default function DebtForm({ onAdd }) {
   const [kind, setKind] = useState("recurring")
   const [amount, setAmount] = useState("")
   const [dueDay, setDueDay] = useState("")
-  const [monthsLeft, setMonthsLeft] = useState("")
+  const [totalMonths, setTotalMonths] = useState("")
+  const [monthsPaid, setMonthsPaid] = useState("")
   const [dueDate, setDueDate] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -20,7 +21,8 @@ export default function DebtForm({ onAdd }) {
     setKind("recurring")
     setAmount("")
     setDueDay("")
-    setMonthsLeft("")
+    setTotalMonths("")
+    setMonthsPaid("")
     setDueDate("")
   }
 
@@ -34,8 +36,9 @@ export default function DebtForm({ onAdd }) {
     // Per-kind required fields.
     if (isRecurring) {
       const day = Number(dueDay)
-      const months = Number(monthsLeft)
-      if (!day || day < 1 || day > 31 || !months || months < 1) return
+      const total = Number(totalMonths)
+      const paid = Number(monthsPaid) || 0
+      if (!day || day < 1 || day > 31 || !total || total < 1 || paid >= total) return
     } else if (!dueDate) {
       return
     }
@@ -43,15 +46,20 @@ export default function DebtForm({ onAdd }) {
     setSubmitting(true)
     await onAdd(
       isRecurring
-        ? {
-            name: trimmedName,
-            kind,
-            amount: numericAmount,
-            due_day: Number(dueDay),
-            months_left: Number(monthsLeft),
-            next_due_date: firstDueDate(Number(dueDay), new Date()),
-            due_date: null,
-          }
+        ? (() => {
+            const total = Number(totalMonths)
+            const paid = Number(monthsPaid) || 0
+            return {
+              name: trimmedName,
+              kind,
+              amount: numericAmount,
+              due_day: Number(dueDay),
+              months_left: total - paid,
+              original_months: total,
+              next_due_date: firstDueDate(Number(dueDay), new Date()),
+              due_date: null,
+            }
+          })()
         : {
             name: trimmedName,
             kind,
@@ -128,16 +136,33 @@ export default function DebtForm({ onAdd }) {
               />
             </label>
             <label className="flex flex-col text-sm text-gray-300">
-              Months left
+              Total months
               <input
                 type="number"
                 min="1"
                 step="1"
-                placeholder="e.g. 12"
-                value={monthsLeft}
-                onChange={(e) => setMonthsLeft(e.target.value)}
+                placeholder="e.g. 60"
+                value={totalMonths}
+                onChange={(e) => setTotalMonths(e.target.value)}
                 className={fieldClass}
               />
+            </label>
+            <label className="flex flex-col text-sm text-gray-300">
+              Months already paid
+              <input
+                type="number"
+                min="0"
+                step="1"
+                placeholder="0 if brand new"
+                value={monthsPaid}
+                onChange={(e) => setMonthsPaid(e.target.value)}
+                className={fieldClass}
+              />
+              {Number(totalMonths) > 0 && (
+                <span className="mt-1 text-xs text-gray-500">
+                  {Number(totalMonths) - (Number(monthsPaid) || 0)} months left
+                </span>
+              )}
             </label>
           </>
         ) : (

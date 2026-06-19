@@ -16,3 +16,9 @@ export function formatDateISO(iso) {
   const [year, month, day] = iso.split("-")
   return `${day}/${month}/${year}`
 }
+
+// Format a Date object as "Oct 2026".
+export function formatMonthYear(date) {
+  if (!date) return ""
+  return date.toLocaleDateString("en-PH", { month: "short", year: "numeric" })
+}

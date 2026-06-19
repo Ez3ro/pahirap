@@ -79,6 +79,40 @@ export function debtStatus(debt, today) {
   return { nextDue, isLate, overdue, paidOff: false }
 }
 
+// Estimated pay-off date for a debt.
+// Recurring: today + months_left months. Lump sum: the due_date itself.
+export function payoffDate(debt, today) {
+  if (debt.kind === "lumpsum" && debt.due_date) return parseISODate(debt.due_date)
+  const months = Number(debt.months_left) || 0
+  if (!months) return null
+  return new Date(today.getFullYear(), today.getMonth() + months, 1)
+}
+
+// "4 months" / "1y 4mo" / "4 years"
+export function formatMonthsLeft(months) {
+  if (!months || months <= 0) return "Done"
+  if (months < 12) return `${months} month${months === 1 ? "" : "s"}`
+  const years = Math.floor(months / 12)
+  const rem = months % 12
+  if (!rem) return `${years} year${years === 1 ? "" : "s"}`
+  return `${years}y ${rem}mo`
+}
+
+// Snowball order: sort active debts by months remaining, shortest first.
+// Lump sums are treated as their months-until-due.
+export function snowballOrder(debts, today) {
+  function urgencyMonths(d) {
+    if (d.kind === "recurring") return Number(d.months_left) || Infinity
+    if (!d.due_date) return Infinity
+    const due = parseISODate(d.due_date)
+    const m = (due.getFullYear() - today.getFullYear()) * 12 + (due.getMonth() - today.getMonth())
+    return Math.max(0, m)
+  }
+  return [...debts]
+    .filter((d) => owedFor(d) > 0)
+    .sort((a, b) => urgencyMonths(a) - urgencyMonths(b))
+}
+
 // Headline figures across all debts.
 export function summariseDebts(debts, today) {
   const year = today.getFullYear()

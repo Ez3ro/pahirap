@@ -8,7 +8,10 @@ import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
 import Income from "./views/Income"
 import Debts from "./views/Debts"
+import Budget from "./views/Budget"
+import LentMoney from "./views/LentMoney"
 import { advanceDue } from "./lib/debts"
+import { DEFAULT_CATEGORIES } from "./lib/categories"
 
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
@@ -23,6 +26,8 @@ export default function App() {
   const [transactions, setTransactions] = useState([])
   const [salarySettings, setSalarySettings] = useState(null)
   const [debts, setDebts] = useState([])
+  const [budgetLimits, setBudgetLimits] = useState([])
+  const [loans, setLoans] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -174,6 +179,89 @@ export default function App() {
     else setDebts((prev) => prev.filter((d) => d.id !== id))
   }
 
+  async function updateDebt(id, fields) {
+    const { error } = await supabase.from("debts").update(fields).eq("id", id)
+    if (error) setError(error.message)
+    else fetchDebts()
+  }
+
+  async function fetchBudgetLimits() {
+    const { data, error } = await supabase.from("budget_limits").select("*")
+    if (error) { setError(error.message); return }
+
+    if (data.length === 0) {
+      // First visit — seed the default categories with no limit set yet.
+      const defaults = DEFAULT_CATEGORIES.map((c) => ({
+        user_id: session.user.id,
+        category: c.key,
+        monthly_limit: 0,
+      }))
+      const { error: seedError } = await supabase.from("budget_limits").insert(defaults)
+      if (seedError) { setError(seedError.message); return }
+      const { data: seeded } = await supabase.from("budget_limits").select("*")
+      setBudgetLimits(seeded ?? [])
+      return
+    }
+
+    setBudgetLimits(data)
+  }
+
+  async function saveBudgetLimit(category, limit) {
+    const { error } = await supabase
+      .from("budget_limits")
+      .upsert(
+        { user_id: session.user.id, category, monthly_limit: limit },
+        { onConflict: "user_id,category" }
+      )
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
+  async function addBudgetCategory(name) {
+    const { error } = await supabase
+      .from("budget_limits")
+      .insert({ user_id: session.user.id, category: name, monthly_limit: 0 })
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
+  async function removeBudgetCategory(category) {
+    const { error } = await supabase
+      .from("budget_limits")
+      .delete()
+      .eq("user_id", session.user.id)
+      .eq("category", category)
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
+  async function fetchLoans() {
+    const { data, error } = await supabase
+      .from("loans")
+      .select("*")
+      .order("created_at", { ascending: false })
+    if (error) setError(error.message)
+    else setLoans(data)
+  }
+
+  async function addLoan(loan) {
+    const { error } = await supabase.from("loans").insert([loan])
+    if (error) setError(error.message)
+    else fetchLoans()
+  }
+
+  async function updateLoan(id, fields) {
+    const { error } = await supabase.from("loans").update(fields).eq("id", id)
+    if (error) setError(error.message)
+    else fetchLoans()
+  }
+
+  async function deleteLoan(id) {
+    const { error } = await supabase.from("loans").delete().eq("id", id)
+    if (error) setError(error.message)
+    else setLoans((prev) => prev.filter((l) => l.id !== id))
+  }
+
   // Record a debt payment: log it as an expense (which lowers the balance), then
   // for a recurring debt drop one month and move the due date forward; for a
   // lump sum, settle it by removing it.
@@ -230,10 +318,14 @@ export default function App() {
       fetchTransactions()
       fetchSalarySettings()
       fetchDebts()
+      fetchBudgetLimits()
+      fetchLoans()
     } else {
       setTransactions([])
       setSalarySettings(null)
       setDebts([])
+      setBudgetLimits([])
+      setLoans([])
     }
   }, [session])
 
@@ -260,13 +352,14 @@ export default function App() {
     switch (view) {
       case "dashboard":
         return (
-          <Dashboard transactions={transactions} debts={debts} onPayDebt={payDebt} />
+          <Dashboard transactions={transactions} debts={debts} budgetLimits={budgetLimits} loans={loans} />
         )
       case "transactions":
         return (
           <Transactions
             transactions={transactions}
             loading={loading}
+            categories={budgetLimits.map((b) => b.category)}
             onAdd={addTransaction}
             onDelete={deleteTransaction}
           />
@@ -292,14 +385,27 @@ export default function App() {
             onAdd={addDebt}
             onDelete={deleteDebt}
             onPay={payDebt}
+            onUpdate={updateDebt}
           />
         )
-      default:
-        // Budget — built in the next stage.
+      case "budget":
         return (
-          <div className="rounded-xl border border-dashed border-gray-700 p-10 text-center text-gray-500">
-            This section is coming in the next step.
-          </div>
+          <Budget
+            transactions={transactions}
+            budgetLimits={budgetLimits}
+            onSaveLimit={saveBudgetLimit}
+            onAddCategory={addBudgetCategory}
+            onRemoveCategory={removeBudgetCategory}
+          />
+        )
+      case "lent":
+        return (
+          <LentMoney
+            loans={loans}
+            onAdd={addLoan}
+            onUpdate={updateLoan}
+            onDelete={deleteLoan}
+          />
         )
     }
   }

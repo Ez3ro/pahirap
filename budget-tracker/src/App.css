@@ -1,3 +1,28 @@
+/* Budget bar laser sweep — a subtle highlight that drifts across the green
+   remaining-budget bar once every few seconds. */
+@keyframes laser-sweep {
+  0%   { transform: translateX(-100%); opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { transform: translateX(400%); opacity: 0; }
+}
+
+.bar-laser {
+  position: relative;
+  overflow: hidden;
+}
+
+.bar-laser::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 25%;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.28) 50%, transparent 100%);
+  animation: laser-sweep 4s ease-in-out infinite;
+  animation-delay: 2s;
+  pointer-events: none;
+}
+
 .counter {
   font-size: 16px;
   padding: 5px 10px;

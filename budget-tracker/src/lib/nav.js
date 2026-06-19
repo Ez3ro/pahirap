@@ -7,4 +7,5 @@ export const NAV_ITEMS = [
   { key: "income", label: "Income", icon: "💰" },
   { key: "debts", label: "Debts", icon: "🏦" },
   { key: "budget", label: "Budget", icon: "🥧" },
+  { key: "lent", label: "Lent Money", icon: "🤝" },
 ]
