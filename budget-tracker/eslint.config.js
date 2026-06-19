@@ -18,4 +18,12 @@ export default defineConfig([
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
   },
+  {
+    // shadcn/ui components export helper functions (e.g. buttonVariants)
+    // alongside the component, which is fine — silence the Fast Refresh rule here.
+    files: ['src/components/ui/**/*.{js,jsx}'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])
