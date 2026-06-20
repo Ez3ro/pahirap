@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { SpeedInsights } from '@vercel/speed-insights/react'
+import { Analytics } from '@vercel/analytics/react'
 import { supabase } from "./lib/supabase"
 import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
@@ -449,6 +450,7 @@ export default function App() {
         </div>
       </main>
       <SpeedInsights />
+      <Analytics />
     </div>
   )
 }
