@@ -657,11 +657,26 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
   const [payAmount, setPayAmount] = useState("")
   const [paying, setPaying] = useState(false)
 
+  // New charge to add onto the balance when the card is swiped again.
+  const [chargeAmount, setChargeAmount] = useState("")
+  const [charging, setCharging] = useState(false)
+
   async function handlePay(amount) {
     setPaying(true)
     await onPay(d, amount)
     setPaying(false)
     setPayAmount("")
+  }
+
+  // Add a new purchase onto the revolving balance. This isn't logged as a
+  // transaction — it grows what you owe, and the eventual payment is the expense.
+  async function handleCharge() {
+    const add = Number(chargeAmount)
+    if (!(add > 0)) return
+    setCharging(true)
+    await onUpdate(d.id, { balance: (Number(d.balance) || 0) + add })
+    setCharging(false)
+    setChargeAmount("")
   }
 
   return (
@@ -735,8 +750,29 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
               </button>
             </div>
           )}
+          {/* New charge — when you swipe the card again. */}
+          <div className="mt-3 flex items-center gap-2">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="New charge amount"
+              value={chargeAmount}
+              onChange={(e) => setChargeAmount(e.target.value)}
+              className="w-48 rounded-lg border border-gray-600 bg-gray-700 px-3 py-1.5 text-sm text-gray-100 placeholder-gray-500"
+            />
+            <button
+              onClick={handleCharge}
+              disabled={charging || !(Number(chargeAmount) > 0)}
+              className="rounded-lg bg-amber-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+            >
+              {charging ? "Adding…" : "Add charge"}
+            </button>
+          </div>
+
           <p className="mt-2 text-xs text-gray-500">
-            Paying reduces the balance. Update the balance here anytime to match your statement.
+            Paying reduces the balance; adding a charge grows it. A charge isn't logged as
+            spending — the payment is.
           </p>
         </div>
       )}
