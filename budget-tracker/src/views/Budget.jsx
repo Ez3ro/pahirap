@@ -1,52 +1,64 @@
 import { useState } from "react"
 import { formatMoney } from "../lib/format"
-import { categoryIcon } from "../lib/categories"
+import { categoryIcon, categoryColor, isDebtPayment } from "../lib/categories"
+import { currentPeriod, isDateInPeriod } from "../lib/period"
+import { buildBudgetPlan } from "../lib/budgetPlan"
+import { ringStats } from "../lib/ring"
+import BudgetRing from "../components/BudgetRing"
 
-// Returns { start, end, label } for the current cutoff period.
-function currentCutoff(today) {
-  const y = today.getFullYear()
-  const m = today.getMonth()
-  const d = today.getDate()
-  if (d <= 15) {
-    return {
-      start: new Date(y, m, 1),
-      end: new Date(y, m, 15, 23, 59, 59),
-      label: `1st–15th · ${today.toLocaleString("en-PH", { month: "long", year: "numeric" })}`,
-    }
-  }
-  return {
-    start: new Date(y, m, 16),
-    end: new Date(y, m + 1, 0, 23, 59, 59),
-    label: `16th–end · ${today.toLocaleString("en-PH", { month: "long", year: "numeric" })}`,
-  }
+// How many days each timeframe spans, used to scale the budget into an allowance.
+const TIMEFRAMES = [
+  { key: "daily",   label: "Daily",   days: 1 },
+  { key: "weekly",  label: "Weekly",  days: 7 },
+  { key: "monthly", label: "Monthly", days: null }, // whole pay-day period
+]
+
+// Debt payments aren't discretionary spending — they're a committed cost tracked
+// on the Debts page — so they never count against the budget. (Includes both
+// Pay-button payments and anything filed under the Debt category by hand.)
+function isBudgetExpense(t) {
+  return t.type === "expense" && !isDebtPayment(t)
 }
 
 export default function Budget({
   transactions,
   budgetLimits,
+  debts = [],
+  loans = [],
+  salarySettings,
   onSaveLimit,
+  onApplyBudget,
+  onSetAutoBudget,
+  onSetCadence,
   onAddCategory,
   onRemoveCategory,
 }) {
   const today = new Date()
-  const cutoff = currentCutoff(today)
+  const period = currentPeriod(today, salarySettings)
 
-  // Sum expenses per category within the current cutoff.
+  // The auto-budget waterfall: income → committed costs → needs-first split of the
+  // rest. Recomputed every render, so it tracks income/debt/lent/spend changes live.
+  const plan = buildBudgetPlan({ transactions, debts, budgetLimits, loans, period })
+
+  // Sum expenses per category within the current pay-day period (used by the
+  // category cards, which always reflect the whole period). Debt payments are
+  // excluded so paying a loan doesn't look like blowing your budget.
   const spent = {}
   for (const t of transactions) {
-    if (t.type !== "expense" || !t.category) continue
+    if (!isBudgetExpense(t) || !t.category) continue
     const d = new Date(t.created_at)
-    if (d >= cutoff.start && d <= cutoff.end) {
+    if (isDateInPeriod(d, period)) {
       spent[t.category] = (spent[t.category] || 0) + Number(t.amount)
     }
   }
 
-  const totalLimit      = budgetLimits.reduce((s, b) => s + Number(b.monthly_limit), 0)
-  const totalSpent      = Object.values(spent).reduce((s, v) => s + v, 0)
-  const totalRemaining  = totalLimit - totalSpent
-  const isOverall       = totalLimit > 0 && totalRemaining < 0
-  // Bar shows remaining budget — recedes to 0% as you spend, stays 0% when over.
-  const overallBarPct   = totalLimit > 0 ? Math.max(0, Math.round((totalRemaining / totalLimit) * 100)) : null
+  // One ring per cadence — each scoped to the categories you budgeted at that
+  // cadence (daily food, weekly bills, etc.). A ring only shows if it has
+  // categories. Side by side.
+  const rings = TIMEFRAMES
+    .map((tf) => ({ ...tf, stats: ringStats(transactions, budgetLimits, period, tf.key, today) }))
+    .filter((r) => r.stats.hasBudget)
+  const hasBudget = rings.length > 0
 
   const [newCategory, setNewCategory] = useState("")
   const [addingCategory, setAddingCategory] = useState(false)
@@ -62,36 +74,21 @@ export default function Budget({
 
   return (
     <div className="space-y-6">
-      {/* Cutoff header + overall bar */}
-      <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
-        <p className="mb-1 text-sm text-gray-400">{cutoff.label}</p>
-        <div className="flex items-end justify-between">
-          <div>
-            <p className="text-2xl font-bold text-gray-100">{formatMoney(totalSpent)}</p>
-            <p className="text-sm text-gray-400">
-              of {totalLimit > 0 ? formatMoney(totalLimit) : "no limit set"} budgeted
-            </p>
-          </div>
-          {overallBarPct !== null && (
-            <span className={`text-lg font-semibold ${isOverall || overallBarPct <= 10 ? "text-red-400" : overallBarPct <= 30 ? "text-amber-400" : "text-green-400"}`}>
-              {isOverall ? "0%" : `${overallBarPct}%`}
-            </span>
-          )}
+      {/* Auto-budget plan: income → debt due → split the rest across categories */}
+      <AutoBudgetPlan plan={plan} period={period} onApplyBudget={onApplyBudget} />
+
+      {/* Daily / weekly / monthly rings — all three at once */}
+      {hasBudget ? (
+        <div className={`grid gap-4 ${rings.length >= 3 ? "sm:grid-cols-3" : rings.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
+          {rings.map((r) => (
+            <RingCard key={r.key} label={r.label} stats={r.stats} />
+          ))}
         </div>
-        {isOverall && (
-          <p className="mt-1 text-sm font-semibold text-red-400">
-            {formatMoney(Math.abs(totalRemaining))} over budget
-          </p>
-        )}
-        {overallBarPct !== null && (
-          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-700">
-            <div
-              className={`h-2 rounded-full transition-all ${isOverall || overallBarPct <= 10 ? "bg-red-500" : overallBarPct <= 30 ? "bg-amber-400" : "bg-green-500"} ${!isOverall && overallBarPct > 30 ? "bar-laser" : ""}`}
-              style={{ width: `${isOverall ? 0 : overallBarPct}%` }}
-            />
-          </div>
-        )}
-      </div>
+      ) : (
+        <div className="rounded-xl border border-gray-700 bg-gray-800 p-6 text-center text-sm text-gray-400">
+          Set a limit on a category below to start tracking your budget.
+        </div>
+      )}
 
       {/* Category cards */}
       <div className="grid gap-4 sm:grid-cols-2">
@@ -101,7 +98,11 @@ export default function Budget({
             category={b.category}
             limit={Number(b.monthly_limit)}
             spent={spent[b.category] || 0}
+            autoBudget={b.auto_budget !== false}
+            cadence={b.cadence || "monthly"}
             onSave={(val) => onSaveLimit(b.category, val)}
+            onToggleAuto={onSetAutoBudget ? (on) => onSetAutoBudget(b.category, on) : null}
+            onSetCadence={onSetCadence ? (c) => onSetCadence(b.category, c) : null}
             onRemove={() => onRemoveCategory(b.category)}
           />
         ))}
@@ -144,9 +145,239 @@ export default function Budget({
   )
 }
 
+// ─── Auto-budget plan ─────────────────────────────────────────────────────────
+
+// The waterfall card: income for the period, the committed costs taken off the
+// top (debt, lent money, what's already spent), what's left, and the needs-first
+// suggested budget across un-budgeted categories — with a button to write those
+// suggestions into your limits. Advisory until you apply it; editing any category
+// by hand still wins.
+function AutoBudgetPlan({ plan, period, onApplyBudget }) {
+  const [applying, setApplying] = useState(false)
+
+  // Rows whose number came from the auto-allocation (the unset categories),
+  // grouped into needs and wants for display.
+  const autoRows = plan.allocations.filter((a) => a.isAuto && a.suggested > 0)
+  const needRows = autoRows.filter((a) => a.tier === "need")
+  const wantRows = autoRows.filter((a) => a.tier !== "need")
+  const canApply = autoRows.length > 0 && !!onApplyBudget
+
+  async function handleApply() {
+    setApplying(true)
+    await onApplyBudget(autoRows.map((a) => ({ category: a.category, monthly_limit: a.suggested })))
+    setApplying(false)
+  }
+
+  if (plan.empty) {
+    return (
+      <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
+        <h3 className="font-semibold text-gray-100">Auto-budget</h3>
+        <p className="mt-1 text-sm text-gray-400">
+          No income recorded for the {period.label} period yet. Record your pay on the
+          Income page and your budget will be planned automatically here.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-xl border border-violet-800 bg-violet-950/30 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="font-semibold text-gray-100">Auto-budget</h3>
+          <p className="text-xs text-gray-400">{period.label} period</p>
+        </div>
+        {canApply && (
+          <button
+            onClick={handleApply}
+            disabled={applying}
+            className="shrink-0 rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+          >
+            {applying ? "Applying…" : "Apply suggested budget"}
+          </button>
+        )}
+      </div>
+
+      {/* Waterfall: income → committed costs → leftover */}
+      <div className="space-y-1.5 text-sm">
+        <WaterfallRow label="Income this period" value={plan.income} tone="text-green-400" sign="+" />
+        {plan.debtPaid > 0 && (
+          <WaterfallRow label="Debt paid this period" value={plan.debtPaid} tone="text-red-400" sign="−" />
+        )}
+        {plan.debtDue > 0 && (
+          <WaterfallRow label="Debt still due this period" value={plan.debtDue} tone="text-red-400" sign="−" />
+        )}
+        {plan.lentOut > 0 && (
+          <WaterfallRow label="Lent out this period" value={plan.lentOut} tone="text-amber-400" sign="−" />
+        )}
+        {plan.alreadySpent > 0 && (
+          <WaterfallRow label="Already spent this period" value={plan.alreadySpent} tone="text-gray-300" sign="−" />
+        )}
+        {plan.manualTotal > 0 && (
+          <WaterfallRow label="Your set category budgets" value={plan.manualTotal} tone="text-gray-300" sign="−" />
+        )}
+        <div className="border-t border-violet-800/60 pt-1.5">
+          <WaterfallRow
+            label={plan.overcommitted ? "Short this period" : "Left to budget"}
+            value={Math.abs(plan.overcommitted ? plan.afterCommitted : plan.leftover)}
+            tone={plan.overcommitted ? "text-red-400" : "text-gray-100"}
+            bold
+          />
+        </div>
+      </div>
+
+      {plan.overcommitted ? (
+        <p className="mt-3 rounded-lg border border-red-900 bg-red-950/50 p-2 text-xs text-red-300">
+          Your committed costs this period (debt and lent money) are more than your
+          income. Cover those first — there's nothing left to budget for spending.
+        </p>
+      ) : (
+        <>
+          {autoRows.length > 0 && (
+            <div className="mt-3 space-y-2">
+              <p className="text-xs text-gray-400">
+                Suggested budget for categories with no limit set — essentials funded first:
+              </p>
+              {needRows.length > 0 && <ChipRow label="Needs" rows={needRows} />}
+              {wantRows.length > 0 && <ChipRow label="Wants" rows={wantRows} />}
+            </div>
+          )}
+
+          {/* Surplus beyond all caps — suggest debt, else savings. */}
+          {plan.surplus > 0 && (
+            <p className="mt-3 rounded-lg border border-violet-800 bg-violet-900/30 p-2 text-xs text-violet-200">
+              💪 You have <span className="font-semibold">{formatMoney(plan.surplus)}</span> spare after
+              covering essentials.{" "}
+              {plan.killTarget ? (
+                <>
+                  Throw it at <span className="font-semibold">{plan.killTarget.name}</span> (your
+                  kill-order target) to clear debt faster.
+                </>
+              ) : (
+                <>Move it to savings.</>
+              )}
+            </p>
+          )}
+
+          <p className="mt-3 text-[11px] text-gray-500">
+            Updates automatically as income, debt, lent money and spending change.
+            Applied categories keep the value you set — only un-set ones re-adjust.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+// A labelled row of category allocation chips (one row for Needs, one for Wants).
+function ChipRow({ label, rows }) {
+  return (
+    <div>
+      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">{label}</p>
+      <div className="flex flex-wrap gap-2">
+        {rows.map((a) => (
+          <span
+            key={a.category}
+            className="flex items-center gap-1.5 rounded-full bg-gray-800 px-2.5 py-1 text-xs text-gray-300"
+          >
+            <span aria-hidden>{categoryIcon(a.category)}</span>
+            {a.category}
+            <span className="font-medium text-gray-100">{formatMoney(a.suggested)}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function WaterfallRow({ label, value, tone = "text-gray-300", sign = "", bold = false }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-gray-400">{label}</span>
+      <span className={`${tone} ${bold ? "text-base font-bold" : "font-medium"}`}>
+        {sign}{formatMoney(value)}
+      </span>
+    </div>
+  )
+}
+
+// One cadence's ring card (Daily / Weekly / Monthly budget): the segmented ring
+// plus spent vs allowance and over/left, for the categories budgeted at that
+// cadence. A small per-category list sits under it.
+function RingCard({ label, stats }) {
+  const { spent, allowance, usedPct, remaining, over, rows, label: windowLabel, cadence, pool, poolRemaining } = stats
+  // For daily/weekly the allowance is a pace; show the period pool underneath.
+  const showPool = cadence !== "monthly"
+
+  return (
+    <div className="flex flex-col items-center rounded-xl border border-gray-700 bg-gray-800 p-4 text-center">
+      <p className="mb-3 text-sm font-medium text-gray-300">{label} budget</p>
+      <BudgetRing
+        segments={rows.map((r) => ({ color: categoryColor(r.category), value: r.spent }))}
+        allowance={allowance}
+        pct={usedPct}
+        over={over}
+        size={120}
+      />
+      <p className={`mt-3 text-xl font-bold ${over ? "text-red-400" : "text-gray-100"}`}>
+        {formatMoney(spent)}
+      </p>
+      <p className="text-xs text-gray-500">of {formatMoney(allowance)} {windowLabel}</p>
+      <p className={`mt-1 text-sm font-semibold ${over ? "text-red-400" : "text-green-400"}`}>
+        {over ? `${formatMoney(Math.abs(remaining))} over today` : `${formatMoney(remaining)} left ${cadence === "daily" ? "today" : cadence === "weekly" ? "this week" : ""}`}
+      </p>
+      {showPool && (
+        <p className="mt-0.5 text-xs text-gray-500">
+          {formatMoney(poolRemaining)} of {formatMoney(pool)} left this period
+        </p>
+      )}
+
+      {/* Categories in this ring (monthly shows all, tagged with their cadence) */}
+      {rows.length > 0 && (
+        <div className="mt-3 w-full space-y-1.5 border-t border-gray-700 pt-3 text-left">
+          {rows.map((r) => (
+            <div key={r.category} className="flex items-center gap-2 text-xs">
+              <span aria-hidden>{categoryIcon(r.category)}</span>
+              <span className="min-w-0 flex-1 truncate text-gray-400">{r.category}</span>
+              {cadence === "monthly" && (
+                <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] capitalize text-gray-400">
+                  {r.cadence}
+                </span>
+              )}
+              <span className="shrink-0 text-gray-300">
+                {formatMoney(r.spent)} <span className="text-gray-600">/ {formatMoney(r.allotment)}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Category card ────────────────────────────────────────────────────────────
 
-function CategoryCard({ category, limit, spent, onSave, onRemove }) {
+// Small pill toggle controlling whether a category is part of the auto-budget.
+// Off = the auto-budget skips it and shares its money among the rest.
+function AutoToggle({ on, onChange }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      title={on ? "Included in auto-budget — click to exclude" : "Excluded from auto-budget — click to include"}
+      className="flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-200"
+    >
+      <span className={`relative h-4 w-7 rounded-full transition-colors ${on ? "bg-violet-600" : "bg-gray-600"}`}>
+        <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${on ? "left-3.5" : "left-0.5"}`} />
+      </span>
+      Auto
+    </button>
+  )
+}
+
+function CategoryCard({ category, limit, spent, autoBudget = true, cadence = "monthly", onSave, onToggleAuto, onSetCadence, onRemove }) {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(limit || "")
   const [saving, setSaving] = useState(false)
@@ -172,20 +403,31 @@ function CategoryCard({ category, limit, spent, onSave, onRemove }) {
   }
 
   return (
-    <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
+    <div className={`rounded-xl border bg-gray-800 p-4 ${autoBudget ? "border-gray-700" : "border-gray-700/60 opacity-80"}`}>
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xl" aria-hidden>{categoryIcon(category)}</span>
           <span className="font-medium text-gray-100">{category}</span>
         </div>
-        <button
-          onClick={onRemove}
-          className="text-xs text-gray-600 hover:text-red-400"
-          aria-label={`Remove ${category}`}
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-3">
+          {onToggleAuto && (
+            <AutoToggle on={autoBudget} onChange={onToggleAuto} />
+          )}
+          <button
+            onClick={onRemove}
+            className="text-xs text-gray-600 hover:text-red-400"
+            aria-label={`Remove ${category}`}
+          >
+            ✕
+          </button>
+        </div>
       </div>
+
+      {!autoBudget && (
+        <p className="mb-2 text-[11px] text-gray-500">
+          Not auto-budgeted — its share goes to your other categories.
+        </p>
+      )}
 
       {/* Remaining vs spent */}
       <div className="mb-2 flex items-end justify-between">
@@ -202,7 +444,7 @@ function CategoryCard({ category, limit, spent, onSave, onRemove }) {
           ) : (
             <>
               <p className="text-lg font-semibold text-gray-100">{formatMoney(spent)}</p>
-              <p className="text-xs text-gray-500">spent this cutoff</p>
+              <p className="text-xs text-gray-500">spent this period</p>
             </>
           )}
         </div>
@@ -252,6 +494,26 @@ function CategoryCard({ category, limit, spent, onSave, onRemove }) {
         </>
       ) : (
         <div className="h-2 w-full rounded-full bg-gray-700" />
+      )}
+
+      {/* Cadence — how often this budget resets. Drives how it's spread on the rings. */}
+      {onSetCadence && (
+        <div className="mt-3 flex items-center gap-2 border-t border-gray-700 pt-3">
+          <span className="text-xs text-gray-500">Resets</span>
+          <div className="flex gap-1 rounded-lg bg-gray-900/60 p-0.5">
+            {["daily", "weekly", "monthly"].map((c) => (
+              <button
+                key={c}
+                onClick={() => { if (c !== cadence) onSetCadence(c) }}
+                className={`rounded-md px-2 py-0.5 text-[11px] font-medium capitalize transition-colors ${
+                  cadence === c ? "bg-gray-700 text-gray-100" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   )

@@ -33,8 +33,12 @@ export default function LentMoney({ loans, onAdd, onUpdate, onDelete }) {
   const activeLoans  = loans.filter((l) => !l.written_off && Number(l.amount_paid) < Number(l.amount))
   const settledLoans = loans.filter((l) => l.written_off || Number(l.amount_paid) >= Number(l.amount))
 
+  // Still out the door: amount lent minus what's been paid back, on active loans
+  // only. Falls to 0 once every loan is fully repaid (the old "Total lent" stayed
+  // at the lifetime sum forever, which read as if nothing had come back).
   const totalOutstanding = activeLoans.reduce((s, l) => s + Number(l.amount) - Number(l.amount_paid), 0)
-  const totalLent        = loans.reduce((s, l) => s + Number(l.amount), 0)
+  // Lifetime money that's come back to you, across all loans.
+  const totalRepaid      = loans.reduce((s, l) => s + Number(l.amount_paid), 0)
   const overdueCount     = activeLoans.filter(isOverdue).length
 
   const sortedActive = activeLoans.slice().sort((a, b) => {
@@ -71,8 +75,8 @@ export default function LentMoney({ loans, onAdd, onUpdate, onDelete }) {
     <div className="space-y-6">
       {/* Summary */}
       <div className="grid gap-4 sm:grid-cols-3">
-        <SummaryCard label="Outstanding"   value={formatMoney(totalOutstanding)} tone="text-amber-400" />
-        <SummaryCard label="Total lent"    value={formatMoney(totalLent)} />
+        <SummaryCard label="Outstanding"   value={formatMoney(totalOutstanding)} tone={totalOutstanding > 0 ? "text-amber-400" : "text-green-400"} />
+        <SummaryCard label="Repaid"        value={formatMoney(totalRepaid)} tone="text-green-400" />
         <SummaryCard
           label="Overdue"
           value={`${overdueCount} loan${overdueCount !== 1 ? "s" : ""}`}

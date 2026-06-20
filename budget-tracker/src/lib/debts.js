@@ -1,6 +1,25 @@
 // Pure debt calculations, kept out of the React components so they're easy to
 // follow and test.
 
+// The kinds of debt you can tag, for grouping and per-type subtotals. `key` is
+// what's stored in the debts.debt_type column. Order here is the display order.
+// `color` is a hex used for the composition bar on the Debts page.
+export const DEBT_TYPES = [
+  { key: "card",     label: "Card",       icon: "💳", color: "#60a5fa" }, // blue-400
+  { key: "cash",     label: "Cash loan",  icon: "🪙", color: "#34d399" }, // emerald-400
+  { key: "car",      label: "Car loan",   icon: "🚘", color: "#f472b6" }, // pink-400
+  { key: "house",    label: "House loan", icon: "🏡", color: "#fbbf24" }, // amber-400
+  { key: "personal", label: "Personal",   icon: "🫱", color: "#a78bfa" }, // violet-400
+  { key: "other",    label: "Other",      icon: "🧾", color: "#9ca3af" }, // gray-400
+]
+
+const DEBT_TYPE_BY_KEY = Object.fromEntries(DEBT_TYPES.map((t) => [t.key, t]))
+
+// Look up a debt type (defaults to "Other" for missing/unknown values).
+export function debtType(key) {
+  return DEBT_TYPE_BY_KEY[key] ?? DEBT_TYPE_BY_KEY.other
+}
+
 function parseISODate(iso) {
   const [year, month, day] = iso.split("-").map(Number)
   return new Date(year, month - 1, day)
@@ -39,10 +58,11 @@ export function advanceDue(currentISO, dueDay) {
 }
 
 // What's still owed on a debt: recurring = months left * monthly payment;
-// lump sum = the amount itself.
+// lump sum = the amount itself; credit card = its current balance.
 export function owedFor(debt) {
   const amount = Number(debt.amount) || 0
   if (debt.kind === "recurring") return amount * (Number(debt.months_left) || 0)
+  if (debt.kind === "credit") return Math.max(0, Number(debt.balance) || 0)
   return amount
 }
 
@@ -50,6 +70,11 @@ export function owedFor(debt) {
 // many months? `paidOff` is true once there are no payments left.
 export function debtStatus(debt, today) {
   const monthsLeft = Number(debt.months_left) || 0
+
+  // Credit card: revolving, so no overdue-months concept. "Paid off" = zero balance.
+  if (debt.kind === "credit") {
+    return { nextDue: null, isLate: false, overdue: 0, paidOff: owedFor(debt) <= 0 }
+  }
 
   if (debt.kind !== "recurring") {
     return { nextDue: null, isLate: false, overdue: 0, paidOff: false }
@@ -98,28 +123,108 @@ export function formatMonthsLeft(months) {
   return `${years}y ${rem}mo`
 }
 
-// Snowball order: sort active debts by months remaining, shortest first.
-// Lump sums are treated as their months-until-due.
-export function snowballOrder(debts, today) {
+// The two payoff strategies the app supports.
+export const KILL_STRATEGIES = [
+  { key: "snowball",  label: "Snowball",  blurb: "Smallest balance first — quick wins to stay motivated." },
+  { key: "avalanche", label: "Avalanche", blurb: "Highest interest first — pays the least interest overall." },
+]
+
+// Is a debt part of the payoff strategy? Lump sums are excluded — they're a
+// one-off payment with a fixed due date, not something you accelerate by throwing
+// spare cash at in sequence. Only ongoing debts (recurring loans, credit cards)
+// belong in the kill order.
+function inKillOrder(debt) {
+  return (debt.kind === "recurring" || debt.kind === "credit") && owedFor(debt) > 0
+}
+
+// Snowball order: sort active ongoing debts by months remaining, shortest first.
+// (Callers may pass `today` for signature parity with the other order helpers;
+// it's ignored — extra args are harmless — now that lump sums are excluded.)
+export function snowballOrder(debts) {
   function urgencyMonths(d) {
     if (d.kind === "recurring") return Number(d.months_left) || Infinity
-    if (!d.due_date) return Infinity
-    const due = parseISODate(d.due_date)
-    const m = (due.getFullYear() - today.getFullYear()) * 12 + (due.getMonth() - today.getMonth())
-    return Math.max(0, m)
+    if (d.kind === "credit") {
+      // Months to clear the balance paying just the minimum (rough; ignores interest).
+      const min = Number(d.amount) || 0
+      const bal = owedFor(d)
+      return min > 0 ? bal / min : Infinity
+    }
+    return Infinity
   }
   return [...debts]
-    .filter((d) => owedFor(d) > 0)
+    .filter(inKillOrder)
     .sort((a, b) => urgencyMonths(a) - urgencyMonths(b))
 }
 
+// Avalanche order: sort active debts by interest rate, highest first. Debts with
+// no rate set sink to the bottom; ties fall back to snowball urgency so the order
+// is still sensible. Saves the most interest when rates are filled in.
+export function avalancheOrder(debts, today) {
+  const rate = (d) => (d.interest_rate == null ? -1 : Number(d.interest_rate))
+  const snow = snowballOrder(debts, today) // already filtered to owed > 0
+  const urgency = new Map(snow.map((d, i) => [d.id, i]))
+  return snow.sort((a, b) => {
+    const diff = rate(b) - rate(a)
+    if (diff !== 0) return diff
+    return (urgency.get(a.id) ?? 0) - (urgency.get(b.id) ?? 0)
+  })
+}
+
+// Unified entry point: order active debts by the chosen strategy.
+export function killOrder(debts, today, strategy = "snowball") {
+  return strategy === "avalanche" ? avalancheOrder(debts, today) : snowballOrder(debts, today)
+}
+
+// Is this debt still due within [start, end]?
+//
+// Paying a recurring debt advances its next_due_date to the following month, so a
+// debt counts as "still due" only while its next_due_date sits inside the window
+// AND there are payments left. Once you pay, next_due_date moves past the window
+// and it stops counting — which is what makes "due this period" drop to 0 after
+// you've paid, instead of always showing the full recurring total.
+//
+// `start`/`end` are Date objects (inclusive). A debt that's overdue (next_due_date
+// before the window) still counts, since it remains unpaid and owed.
+export function isDueInWindow(debt, start, end) {
+  const lo = startOfDay(start)
+  const hi = startOfDay(end)
+
+  if (debt.kind === "recurring") {
+    if ((Number(debt.months_left) || 0) <= 0) return false
+    if (!debt.next_due_date) return false
+    const due = parseISODate(debt.next_due_date)
+    // Overdue (before the window) or falling inside it — both are still owed now.
+    return due <= hi
+  }
+
+  if (debt.kind === "lumpsum" && debt.due_date) {
+    const due = parseISODate(debt.due_date)
+    return due >= lo && due <= hi
+  }
+
+  // Credit card: an unpaid card owes its minimum every period, so it's "due" in
+  // any window covering today. (We don't track a per-card statement date.)
+  if (debt.kind === "credit") {
+    const now = startOfDay(new Date())
+    return owedFor(debt) > 0 && now >= lo && now <= hi
+  }
+
+  return false
+}
+
 // Headline figures across all debts.
-export function summariseDebts(debts, today) {
-  const year = today.getFullYear()
-  const month = today.getMonth()
+//
+// `dueWindow` (optional) is a { start, end } pair — when given, "due now" only
+// counts debts whose payment falls in that window and hasn't been made yet. The
+// Dashboard passes the current pay-day period here. Without it, the window
+// defaults to the whole current calendar month.
+export function summariseDebts(debts, today, dueWindow) {
+  const windowStart = dueWindow?.start ?? new Date(today.getFullYear(), today.getMonth(), 1)
+  const windowEnd =
+    dueWindow?.end ?? new Date(today.getFullYear(), today.getMonth() + 1, 0)
 
   let recurringTotal = 0
-  let lumpsumDueThisMonth = 0
+  let dueNow = 0
   let totalOwed = 0
   let lateCount = 0
 
@@ -129,11 +234,15 @@ export function summariseDebts(debts, today) {
     if (debt.kind === "recurring") {
       recurringTotal += amount
       if (debtStatus(debt, today).isLate) lateCount++
-    } else if (debt.kind === "lumpsum" && debt.due_date) {
-      const due = parseISODate(debt.due_date)
-      if (due.getFullYear() === year && due.getMonth() === month) {
-        lumpsumDueThisMonth += amount
-      }
+    } else if (debt.kind === "credit" && owedFor(debt) > 0) {
+      // A card with a balance is a monthly commitment too — its minimum payment.
+      recurringTotal += amount
+    }
+
+    // Only the amount genuinely still due in the window — drops to 0 once paid.
+    // For a card this is its minimum payment (the `amount` field), not the balance.
+    if (isDueInWindow(debt, windowStart, windowEnd)) {
+      dueNow += amount
     }
 
     totalOwed += owedFor(debt)
@@ -141,9 +250,30 @@ export function summariseDebts(debts, today) {
 
   return {
     recurringTotal,
-    lumpsumDueThisMonth,
-    minimumThisMonth: recurringTotal + lumpsumDueThisMonth,
+    // Kept for any callers still reading the old name; now reflects "due now".
+    lumpsumDueThisMonth: dueNow,
+    minimumThisMonth: dueNow,
+    dueNow,
     totalOwed,
     lateCount,
   }
+}
+
+// Per-type breakdown for grouping and subtotals. Returns one entry per debt type
+// that has at least one debt, in DEBT_TYPES order, each with:
+//   monthly — sum of recurring monthly payments of that type
+//   owed     — total still owed (recurring + lump sums) of that type
+//   count    — how many debts of that type
+// Lump sums contribute to `owed` (and `count`) but not `monthly`.
+export function summariseDebtsByType(debts) {
+  const totals = {}
+  for (const debt of debts) {
+    const key = debtType(debt.debt_type).key
+    const t = totals[key] ?? (totals[key] = { type: key, monthly: 0, owed: 0, count: 0 })
+    t.count++
+    t.owed += owedFor(debt)
+    if (debt.kind === "recurring") t.monthly += Number(debt.amount) || 0
+  }
+  // Emit in the canonical DEBT_TYPES order, skipping types with no debts.
+  return DEBT_TYPES.map((dt) => totals[dt.key]).filter(Boolean)
 }

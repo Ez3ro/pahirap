@@ -11,7 +11,7 @@ import Debts from "./views/Debts"
 import Budget from "./views/Budget"
 import LentMoney from "./views/LentMoney"
 import { advanceDue } from "./lib/debts"
-import { DEFAULT_CATEGORIES } from "./lib/categories"
+import { DEFAULT_CATEGORIES, DEBT_CATEGORY } from "./lib/categories"
 
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
@@ -21,7 +21,20 @@ export default function App() {
 
   // Which sidebar section is showing.
   const [view, setView] = useState("dashboard")
+  // Mobile slide-over open/closed.
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  // Desktop: whether the sidebar is collapsed (hidden). Persisted across visits.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("sidebar-collapsed") === "1"
+  )
+
+  function toggleSidebarCollapsed() {
+    setSidebarCollapsed((prev) => {
+      const next = !prev
+      localStorage.setItem("sidebar-collapsed", next ? "1" : "0")
+      return next
+    })
+  }
 
   const [transactions, setTransactions] = useState([])
   const [salarySettings, setSalarySettings] = useState(null)
@@ -68,6 +81,12 @@ export default function App() {
     }
   }
 
+  async function updateTransaction(id, fields) {
+    const { error } = await supabase.from("transactions").update(fields).eq("id", id)
+    if (error) setError(error.message)
+    else fetchTransactions()
+  }
+
   async function fetchSalarySettings() {
     // maybeSingle() returns one row or null (rather than erroring when none exists).
     const { data, error } = await supabase
@@ -78,7 +97,7 @@ export default function App() {
     if (!error) setSalarySettings(data)
   }
 
-  async function saveSalarySettings({ periodA, periodB }) {
+  async function saveSalarySettings({ periodA, periodB, paydayA, paydayB }) {
     // upsert = insert a row, or update it if one already exists for this user
     // (user_id is the primary key, so onConflict targets it).
     const { data, error } = await supabase
@@ -88,6 +107,8 @@ export default function App() {
           user_id: session.user.id,
           period_a_amount: periodA,
           period_b_amount: periodB,
+          payday_a: paydayA,
+          payday_b: paydayB,
           updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id" }
@@ -217,7 +238,52 @@ export default function App() {
     else fetchBudgetLimits()
   }
 
+  // Toggle whether a category takes part in the auto-budget. Off = the auto-split
+  // skips it and shares its money among the rest.
+  async function setCategoryAutoBudget(category, autoBudget) {
+    const { error } = await supabase
+      .from("budget_limits")
+      .update({ auto_budget: autoBudget })
+      .eq("user_id", session.user.id)
+      .eq("category", category)
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
+  // Set how often a category's budget resets (daily / weekly / monthly).
+  async function setCategoryCadence(category, cadence) {
+    const { error } = await supabase
+      .from("budget_limits")
+      .update({ cadence })
+      .eq("user_id", session.user.id)
+      .eq("category", category)
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
+  // Apply an auto-budget: write a batch of { category, monthly_limit } rows in one
+  // upsert. Used by the Budget page's "Apply suggested budget" button.
+  async function applyBudgetLimits(rows) {
+    if (!rows.length) return
+    const { error } = await supabase.from("budget_limits").upsert(
+      rows.map((r) => ({
+        user_id: session.user.id,
+        category: r.category,
+        monthly_limit: r.monthly_limit,
+      })),
+      { onConflict: "user_id,category" }
+    )
+    if (error) setError(error.message)
+    else fetchBudgetLimits()
+  }
+
   async function addBudgetCategory(name) {
+    // "Debt" is reserved — it's a passthrough category the budget deliberately
+    // ignores, so it must never become a budgetable card.
+    if (name.trim().toLowerCase() === DEBT_CATEGORY.toLowerCase()) {
+      setError(`"${DEBT_CATEGORY}" is reserved for debt payments and can't be a budget category.`)
+      return
+    }
     const { error } = await supabase
       .from("budget_limits")
       .insert({ user_id: session.user.id, category: name, monthly_limit: 0 })
@@ -263,11 +329,17 @@ export default function App() {
   }
 
   // Record a debt payment: log it as an expense (which lowers the balance), then
-  // for a recurring debt drop one month and move the due date forward; for a
-  // lump sum, settle it by removing it.
-  async function payDebt(debt) {
+  // update the debt by kind:
+  //   recurring — drop one month, advance the due date
+  //   lump sum   — settle it by removing it
+  //   credit     — reduce the balance by the amount paid (settles when it hits 0)
+  // `payAmount` overrides the amount paid (used for credit cards, where you can
+  // pay more than the minimum); defaults to the debt's standard amount.
+  async function payDebt(debt, payAmount) {
+    const paid = Number(payAmount) > 0 ? Number(payAmount) : Number(debt.amount)
+
     const { error: txError } = await supabase.from("transactions").insert([
-      { name: `Debt: ${debt.name}`, amount: debt.amount, type: "expense" },
+      { name: `Debt: ${debt.name}`, amount: paid, type: "expense", is_debt_payment: true, category: DEBT_CATEGORY },
     ])
     if (txError) {
       setError(txError.message)
@@ -276,6 +348,9 @@ export default function App() {
 
     if (debt.kind === "lumpsum") {
       await supabase.from("debts").delete().eq("id", debt.id)
+    } else if (debt.kind === "credit") {
+      const newBalance = Math.max(0, (Number(debt.balance) || 0) - paid)
+      await supabase.from("debts").update({ balance: newBalance }).eq("id", debt.id)
     } else {
       const monthsLeft = Math.max(0, (Number(debt.months_left) || 0) - 1)
       await supabase
@@ -352,7 +427,7 @@ export default function App() {
     switch (view) {
       case "dashboard":
         return (
-          <Dashboard transactions={transactions} debts={debts} budgetLimits={budgetLimits} loans={loans} />
+          <Dashboard transactions={transactions} debts={debts} budgetLimits={budgetLimits} loans={loans} salarySettings={salarySettings} />
         )
       case "transactions":
         return (
@@ -362,6 +437,7 @@ export default function App() {
             categories={budgetLimits.map((b) => b.category)}
             onAdd={addTransaction}
             onDelete={deleteTransaction}
+            onUpdate={updateTransaction}
           />
         )
       case "income":
@@ -393,7 +469,13 @@ export default function App() {
           <Budget
             transactions={transactions}
             budgetLimits={budgetLimits}
+            debts={debts}
+            loans={loans}
+            salarySettings={salarySettings}
             onSaveLimit={saveBudgetLimit}
+            onApplyBudget={applyBudgetLimits}
+            onSetAutoBudget={setCategoryAutoBudget}
+            onSetCadence={setCategoryCadence}
             onAddCategory={addBudgetCategory}
             onRemoveCategory={removeBudgetCategory}
           />
@@ -422,20 +504,31 @@ export default function App() {
         onSignOut={signOut}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={toggleSidebarCollapsed}
       />
 
       <main className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto">
           <div className="mb-6 flex items-center gap-3">
+            {/* Mobile: open the slide-over. */}
             <button
               onClick={() => setSidebarOpen(true)}
               className="rounded-lg p-2 text-gray-400 hover:bg-gray-800 md:hidden"
               aria-label="Open menu"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-              </svg>
+              <MenuIcon />
             </button>
+            {/* Desktop: show the collapsed sidebar again. Only visible when hidden. */}
+            {sidebarCollapsed && (
+              <button
+                onClick={toggleSidebarCollapsed}
+                className="hidden rounded-lg p-2 text-gray-400 hover:bg-gray-800 md:inline-flex"
+                aria-label="Show sidebar"
+              >
+                <MenuIcon />
+              </button>
+            )}
             <h2 className="text-2xl font-bold text-gray-100">{activeTitle}</h2>
           </div>
 
@@ -450,5 +543,13 @@ export default function App() {
       </main>
       <SpeedInsights />
     </div>
+  )
+}
+
+function MenuIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
   )
 }

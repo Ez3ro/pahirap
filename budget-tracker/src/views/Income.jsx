@@ -20,6 +20,9 @@ export default function Income({
 
   const [periodA, setPeriodA] = useState(settings?.period_a_amount ?? "")
   const [periodB, setPeriodB] = useState(settings?.period_b_amount ?? "")
+  // The day of the month each paycheck lands on (defaults: 20th and 5th).
+  const [paydayA, setPaydayA] = useState(settings?.payday_a ?? 20)
+  const [paydayB, setPaydayB] = useState(settings?.payday_b ?? 5)
   // Start locked if amounts already exist; start editable for first-time setup.
   const [editing, setEditing] = useState(!hasAmounts)
 
@@ -67,8 +70,20 @@ export default function Income({
     })),
   ].sort((a, b) => (a.dateISO < b.dateISO ? 1 : -1))
 
+  // Clamp a typed day to a valid 1–31, falling back to the default.
+  function cleanDay(value, fallback) {
+    const n = Math.round(Number(value))
+    if (!Number.isFinite(n) || n < 1) return fallback
+    return Math.min(31, n)
+  }
+
   async function handleSaveSettings() {
-    await onSaveSettings({ periodA: Number(periodA) || 0, periodB: Number(periodB) || 0 })
+    await onSaveSettings({
+      periodA: Number(periodA) || 0,
+      periodB: Number(periodB) || 0,
+      paydayA: cleanDay(paydayA, 20),
+      paydayB: cleanDay(paydayB, 5),
+    })
     setEditing(false)
   }
 
@@ -76,6 +91,8 @@ export default function Income({
     // Discard edits and relock, restoring the saved values.
     setPeriodA(settings?.period_a_amount ?? "")
     setPeriodB(settings?.period_b_amount ?? "")
+    setPaydayA(settings?.payday_a ?? 20)
+    setPaydayB(settings?.payday_b ?? 5)
     setEditing(false)
   }
 
@@ -110,8 +127,8 @@ export default function Income({
                     )}
                   </div>
                   <p className="text-sm text-gray-400">
-                    {isAdvance ? "Coming up — covers" : "Covers"} the{" "}
-                    {duePayday.periodLabel} period.
+                    {isAdvance ? "Coming up — paid on " : "Paid on "}
+                    {duePayday.periodLabel}.
                   </p>
                 </div>
               </div>
@@ -161,36 +178,27 @@ export default function Income({
       <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
         <h3 className="mb-1 font-semibold text-gray-100">Salary settings</h3>
         <p className="mb-4 text-sm text-gray-400">
-          Enter your take-home pay for each half of the month.
+          You're paid twice a month. Pick the day each paycheck lands and your
+          take-home pay for it.
         </p>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col text-sm text-gray-300">
-            1st-15th — paid on the 20th
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="0.00"
-              value={periodA}
-              onChange={(e) => setPeriodA(e.target.value)}
-              disabled={!editing}
-              className="mt-1 rounded-lg border border-gray-600 bg-gray-700 px-3 py-2 text-gray-100 placeholder-gray-500 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </label>
-          <label className="flex flex-col text-sm text-gray-300">
-            16th-end — paid on the 5th
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="0.00"
-              value={periodB}
-              onChange={(e) => setPeriodB(e.target.value)}
-              disabled={!editing}
-              className="mt-1 rounded-lg border border-gray-600 bg-gray-700 px-3 py-2 text-gray-100 placeholder-gray-500 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </label>
+          <PaydayField
+            title="First payday"
+            day={paydayA}
+            amount={periodA}
+            editing={editing}
+            onDayChange={setPaydayA}
+            onAmountChange={setPeriodA}
+          />
+          <PaydayField
+            title="Second payday"
+            day={paydayB}
+            amount={periodB}
+            editing={editing}
+            onDayChange={setPaydayB}
+            onAmountChange={setPeriodB}
+          />
         </div>
 
         <div className="mt-4 flex items-center gap-3">
@@ -262,6 +270,50 @@ export default function Income({
             ))}
           </ul>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Payday field ───────────────────────────────────────────────────────────
+
+// A day-of-month picker (1–31) paired with the take-home amount for that payday.
+function PaydayField({ title, day, amount, editing, onDayChange, onAmountChange }) {
+  return (
+    <div className="rounded-lg border border-gray-700 bg-gray-900/40 p-3">
+      <p className="mb-2 text-sm font-medium text-gray-300">{title}</p>
+      <div className="flex gap-3">
+        <label className="flex w-24 shrink-0 flex-col text-xs text-gray-400">
+          Day of month
+          <select
+            value={day}
+            onChange={(e) => onDayChange(Number(e.target.value))}
+            disabled={!editing}
+            className="mt-1 rounded-lg border border-gray-600 bg-gray-700 px-2 py-2 text-sm text-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-1 flex-col text-xs text-gray-400">
+          Take-home pay
+          <div className="relative mt-1">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
+              {CURRENCY}
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0.00"
+              value={amount}
+              onChange={(e) => onAmountChange(e.target.value)}
+              disabled={!editing}
+              className="w-full rounded-lg border border-gray-600 bg-gray-700 py-2 pl-7 pr-3 text-sm text-gray-100 placeholder-gray-500 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          </div>
+        </label>
       </div>
     </div>
   )

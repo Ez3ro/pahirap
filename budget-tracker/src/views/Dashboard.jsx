@@ -21,11 +21,14 @@ import {
   CardContent,
 } from "@/components/ui/card"
 import { formatMoney, formatMonthYear } from "@/lib/format"
-import { summariseDebts, startOfDay, snowballOrder, payoffDate, formatMonthsLeft } from "@/lib/debts"
-import { categoryIcon } from "@/lib/categories"
+import { summariseDebts, startOfDay, killOrder, payoffDate, formatMonthsLeft, isDueInWindow, summariseDebtsByType, debtType } from "@/lib/debts"
+import { categoryIcon, categoryColor, isDebtPayment } from "@/lib/categories"
+import { currentPeriod, isDateInPeriod } from "@/lib/period"
+import { ringStats } from "@/lib/ring"
+import BudgetRing from "@/components/BudgetRing"
 
 // The stable list of all possible block IDs, in their default order.
-const DEFAULT_ORDER = ["budget-bar", "spending-debts", "lent-money", "kill-order", "stats"]
+const DEFAULT_ORDER = ["budget-bar", "spending-debts", "kill-order", "stats"]
 
 function loadOrder() {
   try {
@@ -41,14 +44,10 @@ function loadOrder() {
   return DEFAULT_ORDER
 }
 
-// Format a "YYYY-MM-DD" loan date for display (UK-style, matching the Lent Money view).
-function fmtLoanDate(d) {
-  if (!d) return "No date set"
-  return new Date(d + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
-}
-
-export default function Dashboard({ transactions, debts, budgetLimits = [], loans = [] }) {
+export default function Dashboard({ transactions, debts, budgetLimits = [], loans = [], salarySettings }) {
   const income   = transactions.filter((t) => t.type === "income").reduce((s, t) => s + Number(t.amount), 0)
+  // Expenses here is true cash flow, so it INCLUDES debt payments (that money
+  // really left your account). The budget/spending views below exclude them.
   const expenses = transactions.filter((t) => t.type === "expense").reduce((s, t) => s + Number(t.amount), 0)
 
   // Money lent out and not yet returned is cash that's left your pocket, so it
@@ -59,32 +58,30 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   const lentOutstandingAll = loans.reduce((s, l) => s + outstandingOf(l), 0)
   const balance            = income - expenses - lentOutstandingAll
 
-  const today       = startOfDay(new Date())
-  const debtSummary = summariseDebts(debts, today)
+  const today  = startOfDay(new Date())
+  // The current pay-day period (5th → 20th, or 20th → 5th into next month). The
+  // debt summary's "due now" is scoped to this same window, so a debt you've
+  // already paid drops out of the figure instead of always showing its full amount.
+  const period = currentPeriod(today, salarySettings)
+  const debtSummary = summariseDebts(debts, today, period)
+  // Per-type monthly breakdown (Cards ₱X, Car ₱Y, …) for the Debt overview card.
+  const debtByType = summariseDebtsByType(debts)
+  const periodLabel = `${period.label} payday`
 
-  // Cutoff period calculations.
-  const todayDay      = today.getDate()
-  const isFirstCutoff = todayDay <= 15
-  const cutoffEnd     = isFirstCutoff ? 15 : new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate()
-  const cutoffStart   = isFirstCutoff ? 1 : 16
-  const cutoffLabel   = isFirstCutoff ? "1st–15th cutoff" : "16th–end cutoff"
-
-  let dueThisCutoff = 0
+  // Recurring debt still due in this pay-day period (and not yet paid).
+  let dueThisPeriod = 0
   for (const d of debts) {
-    if (d.kind !== "recurring" || !d.next_due_date) continue
-    const [dy, dm, dd] = d.next_due_date.split("-").map(Number)
-    if (dy === today.getFullYear() && dm === today.getMonth() + 1 && dd >= cutoffStart && dd <= cutoffEnd)
-      dueThisCutoff += Number(d.amount) || 0
+    if (d.kind !== "recurring") continue
+    if (isDueInWindow(d, period.start, period.end)) dueThisPeriod += Number(d.amount) || 0
   }
 
-  // Spending by category this cutoff.
-  const cutoffFrom = isFirstCutoff ? new Date(today.getFullYear(), today.getMonth(), 1) : new Date(today.getFullYear(), today.getMonth(), 16)
-  const cutoffTo   = isFirstCutoff ? new Date(today.getFullYear(), today.getMonth(), 15, 23, 59, 59) : new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59)
+  // Spending by category this period — debt payments excluded so they don't show
+  // up as discretionary spending (they're tracked on the Debts page instead).
   const spentByCat = {}
   for (const t of transactions) {
-    if (t.type !== "expense" || !t.category) continue
+    if (t.type !== "expense" || isDebtPayment(t) || !t.category) continue
     const td = new Date(t.created_at)
-    if (td >= cutoffFrom && td <= cutoffTo)
+    if (isDateInPeriod(td, period))
       spentByCat[t.category] = (spentByCat[t.category] || 0) + Number(t.amount)
   }
   const spendingEntries = Object.entries(spentByCat).sort((a, b) => b[1] - a[1])
@@ -96,22 +93,29 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   const budgetOverBy  = isBudgetOver ? spendingTotal - totalBudget : 0
   const budgetPct     = totalBudget > 0 ? Math.max(0, Math.round(((totalBudget - spendingTotal) / totalBudget) * 100)) : null
   const budgetIsGood  = budgetPct !== null && budgetPct > 30 && !isBudgetOver
-  // Per-category rows: only show categories that have a limit or spending this cutoff.
+  // Per-category rows: only show categories that have a limit or spending this period.
   const catRows = budgetLimits
     .map((b) => ({ category: b.category, limit: Number(b.monthly_limit), spent: spentByCat[b.category] || 0 }))
     .filter((r) => r.limit > 0 || r.spent > 0)
     .sort((a, b) => b.spent - a.spent)
 
-  // Lent money — active loans (not written off, not fully repaid).
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
+  // Lent money still out (not written off, not fully repaid) — shown in the stats.
   const lentActive = loans.filter((l) => !l.written_off && Number(l.amount_paid) < Number(l.amount))
   const lentActiveOutstanding = lentActive.reduce((s, l) => s + outstandingOf(l), 0)
-  // "Due next" = soonest promised date among active loans (those with a date first).
-  const datedActive = lentActive.filter((l) => l.promised_date).sort((a, b) => a.promised_date.localeCompare(b.promised_date))
-  const nextDue        = datedActive[0] || null
-  const nextDueOverdue = nextDue && nextDue.promised_date < todayStr
 
   const [budgetExpanded, setBudgetExpanded] = useState(false)
+  const [todayExpanded, setTodayExpanded] = useState(false)
+  const [ringTf, setRingTf] = useState("daily")
+
+  // Budget ring for the chosen cadence — scoped to the categories budgeted at that
+  // cadence (daily food, weekly bills, …), allowance = those categories' limits.
+  const ring = ringStats(transactions, budgetLimits, period, ringTf, new Date())
+  const RING_TFS = [
+    { key: "daily", label: "Today" },
+    { key: "weekly", label: "This week" },
+    { key: "monthly", label: "This month" },
+  ]
+  const ringTitle = RING_TFS.find((t) => t.key === ringTf)?.label ?? "Today"
 
   // Block order — loaded from localStorage, falls back to DEFAULT_ORDER.
   const [blockOrder, setBlockOrder] = useState(loadOrder)
@@ -141,7 +145,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
     switch (id) {
       case "stats":
         return (
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard
               label="Balance"
               value={balance}
@@ -149,6 +153,12 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
             />
             <StatCard label="Income"   value={income}    tone="text-green-500" />
             <StatCard label="Expenses" value={expenses}  tone="text-red-500" />
+            <StatCard
+              label="Lent out"
+              value={lentActiveOutstanding}
+              tone={lentActiveOutstanding > 0 ? "text-amber-400" : "text-foreground"}
+              note={lentActiveOutstanding > 0 ? "owed back to you" : "all settled"}
+            />
           </div>
         )
 
@@ -158,14 +168,14 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
             {/* Spending breakdown — wide left column */}
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle>Spending this cutoff</CardTitle>
+                <CardTitle>Spending this period</CardTitle>
                 <CardDescription>
-                  {isFirstCutoff ? "1st–15th" : "16th–end"} · {today.toLocaleString("en-PH", { month: "long", year: "numeric" })}
+                  {period.label} · {today.toLocaleString("en-PH", { month: "long", year: "numeric" })}
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 {spendingEntries.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No expenses recorded this cutoff yet.</p>
+                  <p className="text-sm text-muted-foreground">No expenses recorded this period yet.</p>
                 ) : (
                   <>
                     <div className="space-y-3">
@@ -195,151 +205,216 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
               </CardContent>
             </Card>
 
-            {/* Debt overview + due this cutoff — right column */}
+            {/* Debt overview + due this period — right column */}
             <div className="flex flex-col gap-4">
               <Card>
                 <CardHeader><CardTitle>Debt overview</CardTitle></CardHeader>
                 <CardContent className="space-y-3 text-sm">
-                  <OverviewRow label="Total still owed"       value={formatMoney(debtSummary.totalOwed)} />
-                  <OverviewRow label="Minimum due this month" value={formatMoney(debtSummary.minimumThisMonth)} />
-                  <OverviewRow label="Overdue debts"          value={String(debtSummary.lateCount)} danger={debtSummary.lateCount > 0} />
+                  <OverviewRow label="Total still owed"  value={formatMoney(debtSummary.totalOwed)} />
+                  <OverviewRow label="Monthly due"       value={formatMoney(debtSummary.recurringTotal)} />
+                  <OverviewRow label="Due this period"   value={formatMoney(debtSummary.dueNow)} />
+                  <OverviewRow label="Overdue debts"     value={String(debtSummary.lateCount)} danger={debtSummary.lateCount > 0} />
+
+                  {/* Per-type monthly breakdown */}
+                  {debtByType.length > 0 && (
+                    <div className="space-y-1.5 border-t border-border pt-2">
+                      <p className="text-xs text-muted-foreground">By type · monthly</p>
+                      {debtByType.map((t) => (
+                        <div key={t.type} className="flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-1.5 text-muted-foreground">
+                            <span aria-hidden>{debtType(t.type).icon}</span>
+                            {debtType(t.type).label}
+                          </span>
+                          <span className="font-medium text-gray-300">
+                            {t.monthly > 0 ? `${formatMoney(t.monthly)}/mo` : formatMoney(t.owed)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
-              <Card
-                className="border-red-700/40 bg-red-950/20"
-                style={{ boxShadow: "0 0 18px rgba(255,14,14,0.46)" }}
-              >
-                <CardHeader>
-                  <CardTitle className="text-red-500">Due this cutoff</CardTitle>
-                  <CardDescription className="text-red-500/70">{cutoffLabel}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-2xl font-semibold text-red-200">{formatMoney(dueThisCutoff)}</p>
-                  <p className="mt-1 text-xs text-red-500">
-                    {isFirstCutoff ? "Due dates 1–15" : `Due dates 16–${cutoffEnd}`} · recurring debts only
-                  </p>
-                </CardContent>
-              </Card>
+              {dueThisPeriod > 0 ? (
+                <Card
+                  className="border-red-700/40 bg-red-950/20"
+                  style={{ boxShadow: "0 0 18px rgba(255,14,14,0.46)" }}
+                >
+                  <CardHeader>
+                    <CardTitle className="text-red-500">Due this period</CardTitle>
+                    <CardDescription className="text-red-500/70">{periodLabel}</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-2xl font-semibold text-red-200">{formatMoney(dueThisPeriod)}</p>
+                    <p className="mt-1 text-xs text-red-500">
+                      Recurring debts due before the next payday
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card className="border-green-800/40 bg-green-950/20">
+                  <CardHeader>
+                    <CardTitle className="text-green-400">All paid this period</CardTitle>
+                    <CardDescription className="text-green-500/70">{periodLabel}</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-green-300">
+                      Nothing more due before the next payday. 🎉
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
             </div>
           </div>
         )
 
       case "budget-bar":
         return (
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle>Budget</CardTitle>
-                <span className="text-xs text-muted-foreground">{cutoffLabel}</span>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {/* Overall bar */}
-              <div className="flex items-end justify-between">
-                <div>
-                  <p className="text-2xl font-bold">{formatMoney(spendingTotal)}</p>
-                  <p className="text-sm text-muted-foreground">of {formatMoney(totalBudget)} budgeted</p>
+          <div className="grid gap-4 lg:grid-cols-3">
+            {/* Period budget — larger (2/3) */}
+            <Card className="lg:col-span-2">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle>Budget</CardTitle>
+                  <span className="text-xs text-muted-foreground">{periodLabel}</span>
                 </div>
-                <span className={`text-lg font-semibold ${isBudgetOver || budgetPct <= 10 ? "text-red-400" : budgetPct <= 30 ? "text-amber-400" : "text-green-400"}`}>
-                  {isBudgetOver ? "0%" : `${budgetPct}%`}
-                </span>
-              </div>
-              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className={`h-2 rounded-full transition-all ${isBudgetOver || budgetPct <= 10 ? "bg-red-500" : budgetPct <= 30 ? "bg-amber-400" : "bg-green-500"} ${budgetIsGood ? "bar-laser" : ""}`}
-                  style={{ width: `${isBudgetOver ? 0 : budgetPct}%` }}
-                />
-              </div>
-              {isBudgetOver && (
-                <p className="mt-1 text-xs font-semibold text-red-400">{formatMoney(budgetOverBy)} over budget</p>
-              )}
-
-              {/* Per-category breakdown — collapsible */}
-              {catRows.length > 0 && (
-                <div className="mt-3 border-t border-border pt-2">
-                  <button
-                    onClick={() => setBudgetExpanded((v) => !v)}
-                    className="flex w-full items-center justify-between py-1 text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    <span>Categories</span>
-                    <span>{budgetExpanded ? "▲" : "▼"}</span>
-                  </button>
-                  {budgetExpanded && (
-                    <div className="mt-2 space-y-2">
-                      {catRows.map(({ category, limit, spent }) => {
-                        const remaining = limit > 0 ? limit - spent : null
-                        const isOver    = remaining !== null && remaining < 0
-                        const remPct    = limit > 0 ? Math.max(0, Math.round(((limit - spent) / limit) * 100)) : null
-                        return (
-                          <div key={category} className="flex items-center gap-2 text-xs">
-                            <span className="shrink-0" aria-hidden>{categoryIcon(category)}</span>
-                            <span className="min-w-0 flex-1 truncate text-muted-foreground">{category}</span>
-                            <span className="shrink-0 whitespace-nowrap text-gray-500">{formatMoney(spent)}</span>
-                            <span className={`shrink-0 whitespace-nowrap font-medium ${isOver ? "text-red-400" : remaining === 0 ? "text-amber-400" : "text-gray-300"}`}>
-                              {remaining === null ? "—" : isOver ? `−${formatMoney(Math.abs(remaining))}` : `${formatMoney(remaining)} left`}
-                            </span>
-                            {remPct !== null && (
-                              <div className="w-8 shrink-0 overflow-hidden rounded-full bg-muted" style={{ height: "3px" }}>
-                                <div
-                                  className={`h-full rounded-full ${isOver ? "bg-red-500" : remPct <= 30 ? "bg-amber-400" : "bg-green-500"}`}
-                                  style={{ width: `${remPct}%` }}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )
-
-      case "lent-money":
-        return (
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle>Lent money</CardTitle>
-                {lentActive.length > 0 && (
-                  <span className="text-xs text-muted-foreground">{formatMoney(lentActiveOutstanding)} out</span>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent>
-              {lentActive.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No money lent out.</p>
-              ) : nextDue ? (
-                <>
-                  <div className={`rounded-lg border p-3 ${nextDueOverdue ? "border-red-700/50 bg-red-950/20" : "border-border bg-muted/30"}`}>
-                    <p className={`text-xs ${nextDueOverdue ? "text-red-400" : "text-muted-foreground"}`}>
-                      {nextDueOverdue ? "Overdue" : "Due next"}
-                    </p>
-                    <div className="mt-1 flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium text-foreground">{nextDue.borrower_name}</p>
-                        <p className="text-xs text-muted-foreground">{fmtLoanDate(nextDue.promised_date)}</p>
-                      </div>
-                      <p className={`shrink-0 font-bold ${nextDueOverdue ? "text-red-300" : "text-foreground"}`}>
-                        {formatMoney(outstandingOf(nextDue))}
-                      </p>
-                    </div>
-                  </div>
-                  {lentActive.length > 1 && (
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      +{lentActive.length - 1} other active loan{lentActive.length - 1 !== 1 ? "s" : ""}
-                    </p>
-                  )}
-                </>
-              ) : (
+              </CardHeader>
+              <CardContent>
+                {/* Spent this period vs the budget. The % and bar show what's LEFT. */}
+                <p className="text-2xl font-bold">{formatMoney(spendingTotal)}</p>
                 <p className="text-sm text-muted-foreground">
-                  {lentActive.length} active loan{lentActive.length !== 1 ? "s" : ""} · no payment dates set.
+                  spent of {formatMoney(totalBudget)} budgeted
                 </p>
-              )}
-            </CardContent>
-          </Card>
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={`h-2 rounded-full transition-all ${isBudgetOver || budgetPct <= 10 ? "bg-red-500" : budgetPct <= 30 ? "bg-amber-400" : "bg-green-500"} ${budgetIsGood ? "bar-laser" : ""}`}
+                    style={{ width: `${isBudgetOver ? 0 : budgetPct}%` }}
+                  />
+                </div>
+                <p className={`mt-1 text-xs font-medium ${isBudgetOver || budgetPct <= 10 ? "text-red-400" : budgetPct <= 30 ? "text-amber-400" : "text-green-400"}`}>
+                  {isBudgetOver
+                    ? `${formatMoney(budgetOverBy)} over budget`
+                    : `${formatMoney(Math.max(0, totalBudget - spendingTotal))} left · ${budgetPct}%`}
+                </p>
+
+                {/* Per-category breakdown — collapsible */}
+                {catRows.length > 0 && (
+                  <div className="mt-3 border-t border-border pt-2">
+                    <button
+                      onClick={() => setBudgetExpanded((v) => !v)}
+                      className="flex w-full items-center justify-between py-1 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      <span>Categories</span>
+                      <span>{budgetExpanded ? "▲" : "▼"}</span>
+                    </button>
+                    {budgetExpanded && (
+                      <div className="mt-2 space-y-2">
+                        {catRows.map(({ category, limit, spent }) => {
+                          const remaining = limit > 0 ? limit - spent : null
+                          const isOver    = remaining !== null && remaining < 0
+                          const remPct    = limit > 0 ? Math.max(0, Math.round(((limit - spent) / limit) * 100)) : null
+                          return (
+                            <div key={category} className="flex items-center gap-2 text-xs">
+                              <span className="shrink-0" aria-hidden>{categoryIcon(category)}</span>
+                              <span className="min-w-0 flex-1 truncate text-muted-foreground">{category}</span>
+                              <span className="shrink-0 whitespace-nowrap text-gray-500">{formatMoney(spent)}</span>
+                              <span className={`shrink-0 whitespace-nowrap font-medium ${isOver ? "text-red-400" : remaining === 0 ? "text-amber-400" : "text-gray-300"}`}>
+                                {remaining === null ? "—" : isOver ? `−${formatMoney(Math.abs(remaining))}` : `${formatMoney(remaining)} left`}
+                              </span>
+                              {remPct !== null && (
+                                <div className="w-8 shrink-0 overflow-hidden rounded-full bg-muted" style={{ height: "3px" }}>
+                                  <div
+                                    className={`h-full rounded-full ${isOver ? "bg-red-500" : remPct <= 30 ? "bg-amber-400" : "bg-green-500"}`}
+                                    style={{ width: `${remPct}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Spending ring — compact (1/3), Daily / Weekly / Monthly toggle */}
+            <Card className="lg:col-span-1">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">{ringTitle}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {/* Timeframe toggle */}
+                <div className="mb-3 flex gap-1 rounded-lg bg-muted/40 p-0.5">
+                  {RING_TFS.map((t) => (
+                    <button
+                      key={t.key}
+                      onClick={() => setRingTf(t.key)}
+                      className={`flex-1 rounded-md px-2 py-1 text-[11px] font-medium capitalize transition-colors ${
+                        ringTf === t.key ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {t.key}
+                    </button>
+                  ))}
+                </div>
+
+                {ring.hasBudget ? (
+                  <>
+                    <div className="flex flex-col items-center text-center">
+                      <BudgetRing
+                        segments={ring.rows.map((r) => ({ color: categoryColor(r.category), value: r.spent }))}
+                        allowance={ring.allowance}
+                        pct={ring.usedPct}
+                        over={ring.over}
+                        size={140}
+                      />
+                      <p className={`mt-3 text-xl font-bold ${ring.over ? "text-red-400" : "text-foreground"}`}>
+                        {formatMoney(ring.spent)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        of {formatMoney(ring.allowance)} {ring.label}
+                      </p>
+                      <p className={`mt-1 text-xs font-semibold ${ring.over ? "text-red-400" : "text-green-400"}`}>
+                        {ring.over
+                          ? `${formatMoney(Math.abs(ring.remaining))} over`
+                          : `${formatMoney(ring.remaining)} left`}
+                      </p>
+                      {ringTf !== "monthly" && (
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          {formatMoney(ring.poolRemaining)} of {formatMoney(ring.pool)} left this period
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Per-category allotment — collapsible */}
+                    {ring.rows.length > 0 && (
+                      <div className="mt-3 border-t border-border pt-2">
+                        <button
+                          onClick={() => setTodayExpanded((v) => !v)}
+                          className="flex w-full items-center justify-between py-1 text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          <span>Categories</span>
+                          <span>{todayExpanded ? "▲" : "▼"}</span>
+                        </button>
+                        {todayExpanded && (
+                          <div className="mt-2 space-y-2">
+                            {ring.rows.map((r) => (
+                              <AllotmentRow key={r.category} row={r} showCadence={ringTf === "monthly"} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    Record income to see your spending allowance.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         )
 
       case "kill-order":
@@ -408,17 +483,22 @@ function GripIcon() {
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function DebtKillOrder({ debts, today }) {
-  const ordered = snowballOrder(debts, today)
+  // Follow the strategy chosen on the Debts page (persisted in localStorage).
+  const strategy = localStorage.getItem("kill-strategy") || "snowball"
+  const ordered = killOrder(debts, today, strategy)
   if (ordered.length === 0) return null
   const [current, ...rest] = ordered
   const finish    = payoffDate(current, today)
   const monthsLeft = current.kind === "recurring" ? Number(current.months_left) || 0 : null
+  const isAvalanche = strategy === "avalanche"
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Kill order</CardTitle>
-        <CardDescription>Snowball — shortest debt first</CardDescription>
+        <CardDescription>
+          {isAvalanche ? "Avalanche — highest interest first" : "Snowball — shortest debt first"}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="rounded-lg border border-green-800 bg-green-950/30 p-3">
@@ -450,6 +530,30 @@ function DebtKillOrder({ debts, today }) {
         )}
       </CardContent>
     </Card>
+  )
+}
+
+// One category's daily (or windowed) allotment row: icon, spent vs allotment, bar.
+function AllotmentRow({ row, showCadence = false }) {
+  const { category, cadence, spent, allotment, pct, over } = row
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="shrink-0" aria-hidden>{categoryIcon(category)}</span>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground">{category}</span>
+      {showCadence && (
+        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] capitalize text-gray-400">{cadence}</span>
+      )}
+      <span className="shrink-0 whitespace-nowrap text-gray-500">
+        {formatMoney(spent)}
+        {allotment > 0 && <span className="text-gray-600"> / {formatMoney(allotment)}</span>}
+      </span>
+      <div className="w-8 shrink-0 overflow-hidden rounded-full bg-muted" style={{ height: "3px" }}>
+        <div
+          className={`h-full rounded-full ${over || pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-green-500"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
   )
 }
 
