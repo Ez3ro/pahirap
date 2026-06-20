@@ -28,11 +28,16 @@ import { ringStats } from "@/lib/ring"
 import BudgetRing from "@/components/BudgetRing"
 
 // The stable list of all possible block IDs, in their default order.
-const DEFAULT_ORDER = ["budget-bar", "spending-debts", "kill-order", "stats"]
+// Stats (Balance / Income / Expenses / Lent out) lead the dashboard.
+const DEFAULT_ORDER = ["stats", "budget-bar", "spending-debts", "kill-order"]
+
+// Bump this when the default order changes in a way that should override a user's
+// previously-saved arrangement (the old localStorage key is then ignored once).
+const ORDER_KEY = "dashboard-order-v2"
 
 function loadOrder() {
   try {
-    const saved = JSON.parse(localStorage.getItem("dashboard-order") || "null")
+    const saved = JSON.parse(localStorage.getItem(ORDER_KEY) || "null")
     if (Array.isArray(saved)) {
       // Keep saved positions, append any new blocks added since last save.
       return [
@@ -128,7 +133,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
     if (!over || active.id === over.id) return
     setBlockOrder((prev) => {
       const next = arrayMove(prev, prev.indexOf(active.id), prev.indexOf(over.id))
-      localStorage.setItem("dashboard-order", JSON.stringify(next))
+      localStorage.setItem(ORDER_KEY, JSON.stringify(next))
       return next
     })
   }
