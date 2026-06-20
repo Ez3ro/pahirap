@@ -54,6 +54,11 @@ export default function DebtForm({ onAdd }) {
       if (!day || day < 1 || day > 31 || !total || total < 1 || paid >= total) return
     } else if (isCredit) {
       if (Number(balance) <= 0) return
+      // Due day is optional for a card; if given it must be a valid day-of-month.
+      if (dueDay !== "") {
+        const day = Number(dueDay)
+        if (!day || day < 1 || day > 31) return
+      }
     } else if (!dueDate) {
       return
     }
@@ -78,15 +83,19 @@ export default function DebtForm({ onAdd }) {
         interest_rate: rate,
       }
     } else if (isCredit) {
+      // Optional due day: when set, the card's payment is anchored to that day of
+      // the month (so it only reads as "due" when that day falls in the window),
+      // mirroring recurring debts. Blank keeps the old "due every period" behaviour.
+      const day = dueDay === "" ? null : Number(dueDay)
       payload = {
         name: trimmedName,
         kind,
         debt_type: debtTypeKey,
         amount: numericAmount, // monthly minimum
         balance: Number(balance), // current revolving balance
-        due_day: null,
+        due_day: day,
         months_left: null,
-        next_due_date: null,
+        next_due_date: day ? firstDueDate(day, new Date()) : null,
         due_date: null,
         interest_rate: rate,
       }
@@ -183,11 +192,18 @@ export default function DebtForm({ onAdd }) {
         )}
 
         {isCredit && (
-          <label className="flex flex-col text-sm text-gray-300">
-            Current balance
-            <input type="number" min="0" step="0.01" placeholder="0.00" value={balance} onChange={(e) => setBalance(e.target.value)} className={fieldClass} />
-            <span className="mt-1 text-xs text-gray-500">What you owe on the card right now.</span>
-          </label>
+          <>
+            <label className="flex flex-col text-sm text-gray-300">
+              Current balance
+              <input type="number" min="0" step="0.01" placeholder="0.00" value={balance} onChange={(e) => setBalance(e.target.value)} className={fieldClass} />
+              <span className="mt-1 text-xs text-gray-500">What you owe on the card right now.</span>
+            </label>
+            <label className="flex flex-col text-sm text-gray-300">
+              Due day of month
+              <input type="number" min="1" max="31" placeholder="optional, e.g. 15" value={dueDay} onChange={(e) => setDueDay(e.target.value)} className={fieldClass} />
+              <span className="mt-1 text-xs text-gray-500">When the minimum is due. Leave blank if it's due every period.</span>
+            </label>
+          </>
         )}
 
         {kind === "lumpsum" && (

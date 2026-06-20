@@ -26,6 +26,15 @@ export default function DebtsToPay({ debts, onPayDebt }) {
       if (y === today.getFullYear() && m - 1 === today.getMonth()) {
         items.push({ debt: d, status: null, sortKey: new Date(y, m - 1, 1).getTime() })
       }
+    } else if (d.kind === "credit" && d.due_day && d.next_due_date) {
+      // A card with a due day behaves like a recurring debt for "due soon".
+      if (d.balance <= 0) continue
+      const [y, m, day] = d.next_due_date.split("-").map(Number)
+      const nextDue = new Date(y, m - 1, day)
+      const dueInDays = (nextDue - today) / DAY_MS
+      if (dueInDays <= SOON_DAYS) {
+        items.push({ debt: d, status: null, sortKey: nextDue.getTime() })
+      }
     }
   }
 
@@ -57,10 +66,10 @@ export default function DebtsToPay({ debts, onPayDebt }) {
                       <span className="text-red-400">
                         {status.overdue} month{status.overdue === 1 ? "" : "s"} overdue
                       </span>
-                    ) : debt.kind === "recurring" ? (
-                      `Due ${formatDateISO(debt.next_due_date)}`
-                    ) : (
+                    ) : debt.kind === "lumpsum" ? (
                       `Due ${formatDateISO(debt.due_date)}`
+                    ) : (
+                      `Due ${formatDateISO(debt.next_due_date)}`
                     )}{" "}
                     · {formatMoney(debt.amount)}
                   </p>

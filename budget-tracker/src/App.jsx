@@ -351,7 +351,13 @@ export default function App() {
       await supabase.from("debts").delete().eq("id", debt.id)
     } else if (debt.kind === "credit") {
       const newBalance = Math.max(0, (Number(debt.balance) || 0) - paid)
-      await supabase.from("debts").update({ balance: newBalance }).eq("id", debt.id)
+      const update = { balance: newBalance }
+      // If the card tracks a due day, roll it to next month so it stops showing
+      // as "due this period" until the next statement (while a balance remains).
+      if (debt.due_day && debt.next_due_date && newBalance > 0) {
+        update.next_due_date = advanceDue(debt.next_due_date, debt.due_day)
+      }
+      await supabase.from("debts").update(update).eq("id", debt.id)
     } else {
       const monthsLeft = Math.max(0, (Number(debt.months_left) || 0) - 1)
       await supabase

@@ -682,6 +682,7 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
           </div>
           <p className="text-xs text-gray-400">
             {formatMoney(minimum)}/mo minimum
+            {d.due_day && ` · due the ${ordinal(d.due_day)}`}
           </p>
         </div>
         <div className="ml-3 flex shrink-0 items-center gap-2">
@@ -744,6 +745,13 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
 }
 
 // ─── Small helpers ─────────────────────────────────────────────────────────────
+
+// "1st", "2nd", "3rd", "21st"… for a day-of-month.
+function ordinal(n) {
+  const v = n % 100
+  if (v >= 11 && v <= 13) return `${n}th`
+  return `${n}${["th", "st", "nd", "rd"][n % 10] || "th"}`
+}
 
 function SummaryCard({ label, value, highlight }) {
   return (
