@@ -202,16 +202,17 @@ export function isDueInWindow(debt, start, end) {
     return due >= lo && due <= hi
   }
 
-  // Credit card. If a due day is set, anchor the payment to that day of the
-  // month and only count it when that day falls inside the window (like a
-  // recurring debt). With no due day, fall back to "due in any window covering
-  // today" — an unpaid card owes its minimum every period.
+  // Credit card. If a due day is set, anchor the payment to next_due_date (like a
+  // recurring debt): it counts while that date is on or before the window's end,
+  // and paying advances it past the window so a paid card drops off. With no due
+  // day, fall back to "due in any window covering today" — an unpaid card owes
+  // its minimum every period.
   if (debt.kind === "credit") {
     if (owedFor(debt) <= 0) return false
-    if (debt.due_day) {
-      // The due date in the window's own month; counts if it lands in [lo, hi].
-      const due = dateOnDay(hi.getFullYear(), hi.getMonth(), debt.due_day)
-      return due >= lo && due <= hi
+    if (debt.due_day && debt.next_due_date) {
+      const due = parseISODate(debt.next_due_date)
+      // Overdue (before the window) or falling inside it — both still owed now.
+      return due <= hi
     }
     const now = startOfDay(new Date())
     return now >= lo && now <= hi

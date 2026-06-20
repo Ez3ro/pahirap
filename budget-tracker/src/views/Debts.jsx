@@ -12,6 +12,8 @@ import {
   KILL_STRATEGIES,
   debtType,
   DEBT_TYPES,
+  advanceDue,
+  isDueInWindow,
 } from "../lib/debts"
 
 export default function Debts({ debts, loading, onAdd, onDelete, onPay, onUpdate }) {
@@ -653,6 +655,14 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
   const rate = d.interest_rate == null ? null : Number(d.interest_rate)
   const cleared = balance <= 0
 
+  // Whether this card currently reads as due in the calendar month. When it tracks
+  // a due day and shows as due, we offer "Mark paid (no charge)" for the case where
+  // it was already paid outside the app and just needs the due date synced.
+  const today = new Date()
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0)
+  const showMarkPaid = !cleared && d.due_day && d.next_due_date && isDueInWindow(d, monthStart, monthEnd)
+
   // Custom payment amount, defaulting to the minimum.
   const [payAmount, setPayAmount] = useState("")
   const [paying, setPaying] = useState(false)
@@ -668,6 +678,8 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
     setPayAmount("")
   }
 
+  const [advancing, setAdvancing] = useState(false)
+
   // Add a new purchase onto the revolving balance. This isn't logged as a
   // transaction — it grows what you owe, and the eventual payment is the expense.
   async function handleCharge() {
@@ -677,6 +689,16 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
     await onUpdate(d.id, { balance: (Number(d.balance) || 0) + add })
     setCharging(false)
     setChargeAmount("")
+  }
+
+  // Roll the due date forward one month WITHOUT logging a payment — for when the
+  // card was paid outside the app and you just need to sync the due date so it
+  // stops showing as due this period.
+  async function handleMarkPaid() {
+    if (!d.due_day || !d.next_due_date) return
+    setAdvancing(true)
+    await onUpdate(d.id, { next_due_date: advanceDue(d.next_due_date, d.due_day) })
+    setAdvancing(false)
   }
 
   return (
@@ -770,9 +792,23 @@ function CreditRow({ debt: d, isExpanded, onToggle, onPay, onDelete, onUpdate })
             </button>
           </div>
 
+          {/* Already paid outside the app — just sync the due date, no expense logged. */}
+          {showMarkPaid && (
+            <div className="mt-3">
+              <button
+                onClick={handleMarkPaid}
+                disabled={advancing}
+                className="rounded-lg border border-gray-600 px-3 py-1.5 text-sm font-medium text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+              >
+                {advancing ? "Saving…" : "Already paid — mark this month done"}
+              </button>
+            </div>
+          )}
+
           <p className="mt-2 text-xs text-gray-500">
             Paying reduces the balance; adding a charge grows it. A charge isn't logged as
-            spending — the payment is.
+            spending — the payment is. Already paid elsewhere? Use “mark this month done” to
+            move the due date forward without logging an expense.
           </p>
         </div>
       )}
