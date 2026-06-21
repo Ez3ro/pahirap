@@ -19,6 +19,32 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
   const [submitting, setSubmitting] = useState(false)
   const amountRef = useRef(null)
 
+  // Swipe-down-to-dismiss. We track the drag offset (only downward) and apply it
+  // as an inline translateY while the finger is down, disabling the CSS transition
+  // so the sheet follows in real time. On release, a far-enough or fast-enough
+  // pull closes; otherwise it snaps back. Handlers live on the grab handle so the
+  // drag never fights with scrolling the chips/form below.
+  const [dragY, setDragY] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const dragStart = useRef(null)
+
+  function onDragStart(e) {
+    dragStart.current = e.touches[0].clientY
+    setDragging(true)
+  }
+  function onDragMove(e) {
+    if (dragStart.current == null) return
+    const delta = e.touches[0].clientY - dragStart.current
+    setDragY(Math.max(0, delta)) // only allow dragging down
+  }
+  function onDragEnd() {
+    if (dragStart.current == null) return
+    dragStart.current = null
+    setDragging(false)
+    if (dragY > 120) onClose() // pulled far enough → dismiss
+    setDragY(0) // snap back (or animate out from here if closing)
+  }
+
   const isExpense = type === "expense"
 
   // Expense categories = budget categories + the built-in Debt passthrough.
@@ -53,6 +79,8 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
     setType("expense")
     setName("")
     setAmount("")
+    setDragY(0)
+    setDragging(false)
     setShowDate(false)
     setDate("")
     setCategory(categories[0] ?? "")
@@ -123,12 +151,23 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
         role="dialog"
         aria-modal="true"
         aria-label="Add transaction"
-        className={`fixed inset-x-0 bottom-0 z-50 mx-auto max-w-lg rounded-t-2xl border border-gray-700 bg-gray-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-2xl transition-transform duration-300 ease-out ${
-          open ? "translate-y-0" : "translate-y-full"
-        }`}
+        className={`fixed inset-x-0 bottom-0 z-50 mx-auto max-w-lg rounded-t-2xl border border-gray-700 bg-gray-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-2xl ${
+          // No transition while a finger is dragging (follow in real time);
+          // transition on otherwise for the slide in/out + snap-back.
+          dragging ? "" : "transition-transform duration-300 ease-out"
+        } ${open ? "translate-y-0" : "translate-y-full"}`}
+        style={dragY ? { transform: `translateY(${dragY}px)` } : undefined}
       >
-        {/* Grab handle */}
-        <div className="mx-auto mb-3 h-1.5 w-10 rounded-full bg-gray-700" aria-hidden />
+        {/* Grab handle — drag this down to dismiss. Bigger touch target than the
+            visible pill so it's easy to grab. */}
+        <div
+          className="-mx-4 -mt-4 mb-1 flex justify-center px-4 pb-2 pt-4 touch-none"
+          onTouchStart={onDragStart}
+          onTouchMove={onDragMove}
+          onTouchEnd={onDragEnd}
+        >
+          <div className="h-1.5 w-10 rounded-full bg-gray-700" aria-hidden />
+        </div>
 
         <form onSubmit={handleSubmit}>
           {/* Expense / Income toggle */}
