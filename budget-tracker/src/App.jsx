@@ -14,6 +14,8 @@ import LentMoney from "./views/LentMoney"
 import { advanceDue } from "./lib/debts"
 import { DEFAULT_CATEGORIES, DEBT_CATEGORY } from "./lib/categories"
 import { triggerInstantCheck } from "./lib/notifications"
+import AddFab from "./components/AddFab"
+import AddTransactionSheet from "./components/AddTransactionSheet"
 
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
@@ -29,6 +31,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("sidebar-collapsed") === "1"
   )
+  // The quick-add bottom sheet, openable from the FAB on any screen.
+  const [addOpen, setAddOpen] = useState(false)
 
   function toggleSidebarCollapsed() {
     setSidebarCollapsed((prev) => {
@@ -64,19 +68,21 @@ export default function App() {
     setLoading(false)
   }
 
+  // Returns true on success so callers (e.g. the add sheet) know whether to close.
   async function addTransaction(transaction) {
     // We don't pass user_id — the table's default (auth.uid()) fills it in.
     const { error } = await supabase.from("transactions").insert([transaction])
     if (error) {
       setError(error.message)
-    } else {
-      fetchTransactions()
-      // Nudge the push function to check budgets now, so an overspend pings you
-      // immediately rather than waiting for the next hourly cron run. Fire-and-
-      // forget: the server makes the real (de-duped) decision, and any failure
-      // here is swallowed so it never affects saving the transaction.
-      triggerInstantCheck()
+      return false
     }
+    fetchTransactions()
+    // Nudge the push function to check budgets now, so an overspend pings you
+    // immediately rather than waiting for the next hourly cron run. Fire-and-
+    // forget: the server makes the real (de-duped) decision, and any failure
+    // here is swallowed so it never affects saving the transaction.
+    triggerInstantCheck()
+    return true
   }
 
   async function deleteTransaction(id) {
@@ -448,9 +454,9 @@ export default function App() {
             transactions={transactions}
             loading={loading}
             categories={budgetLimits.map((b) => b.category)}
-            onAdd={addTransaction}
             onDelete={deleteTransaction}
             onUpdate={updateTransaction}
+            onAddClick={() => setAddOpen(true)}
           />
         )
       case "income":
@@ -554,6 +560,19 @@ export default function App() {
           {renderView()}
         </div>
       </main>
+
+      {/* Quick-add: a floating button on the Dashboard so you can log a spend the
+          moment it happens. The Transactions tab has its own inline "Add
+          transaction" button, so the FAB would be redundant there. */}
+      {view === "dashboard" && <AddFab onClick={() => setAddOpen(true)} />}
+      <AddTransactionSheet
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onAdd={addTransaction}
+        categories={budgetLimits.map((b) => b.category)}
+        transactions={transactions}
+      />
+
       <SpeedInsights />
       <Analytics />
     </div>
