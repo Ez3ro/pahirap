@@ -136,36 +136,3 @@ export async function isSubscribed() {
 function isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent)
 }
-
-// --- testing helpers ---
-
-// Local test: have the service worker show a notification right now, no server
-// involved. Proves permission + SW + rendering on this device. Needs permission
-// already granted (turn the toggle on first).
-export async function sendLocalTest() {
-  if (!pushSupported()) throw new Error("Notifications aren't supported here.")
-  if (Notification.permission !== "granted") {
-    throw new Error("Turn notifications on first, then test.")
-  }
-  await registerServiceWorker()
-  const reg = await navigator.serviceWorker.ready
-  await reg.showNotification("🔔 Test (local)", {
-    body: "if you can read this, notifications work on this device 😎",
-    tag: "test-local",
-    icon: "/icon-192.png",
-    badge: "/icon-192.png",
-    data: { url: "/" },
-  })
-}
-
-// Round-trip test: ask the Supabase send-push function to push to this user's
-// devices via the real pipeline (VAPID + push service), bypassing budget logic.
-// Proves the whole chain end-to-end — including delivery when the app is closed.
-// Requires the function to be deployed with its VAPID secrets set.
-export async function sendServerTest() {
-  const { data, error } = await supabase.functions.invoke("send-push", {
-    body: { test: true },
-  })
-  if (error) throw new Error(error.message || "Couldn't reach the push function.")
-  return data
-}

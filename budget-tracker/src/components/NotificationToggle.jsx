@@ -5,8 +5,6 @@ import {
   isSubscribed,
   enableNotifications,
   disableNotifications,
-  sendLocalTest,
-  sendServerTest,
 } from "../lib/notifications"
 
 // A compact on/off control for push notifications, shown in the sidebar footer.
@@ -52,24 +50,6 @@ export default function NotificationToggle() {
     }
   }
 
-  async function runTest(kind) {
-    setBusy(true)
-    setNote("")
-    try {
-      if (kind === "local") {
-        await sendLocalTest()
-        setNote("Sent a local test — check your notifications.")
-      } else {
-        const res = await sendServerTest()
-        setNote(`Server test sent (delivered to ${res?.sent ?? 0} device${res?.sent === 1 ? "" : "s"}).`)
-      }
-    } catch (err) {
-      setNote(err.message || "Test failed.")
-    } finally {
-      setBusy(false)
-    }
-  }
-
   if (needsInstall) {
     return (
       <p className="px-3 text-xs text-gray-500">
@@ -100,27 +80,6 @@ export default function NotificationToggle() {
           />
         </span>
       </button>
-      {/* Test buttons — only useful once notifications are on. */}
-      {on && (
-        <div className="mt-1 flex gap-2 px-3">
-          <button
-            onClick={() => runTest("local")}
-            disabled={busy}
-            className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-60"
-            title="Show a notification from this device (no server)"
-          >
-            Test (local)
-          </button>
-          <button
-            onClick={() => runTest("server")}
-            disabled={busy}
-            className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-60"
-            title="Push from the server, end-to-end (needs the function deployed)"
-          >
-            Test (server)
-          </button>
-        </div>
-      )}
       {note && <p className="px-3 pt-1 text-xs text-gray-500">{note}</p>}
     </div>
   )
