@@ -1,0 +1,11 @@
+# Minimal Supabase CLI config so `npx supabase` recognises this project.
+# project_id is your project REF — the subdomain in your Supabase URL
+# (https://<ref>.supabase.co). Not secret.
+project_id = "utmurpyzwdknqhakdlel"
+
+[functions.send-push]
+# Our send-push function is called both by the in-app test (which sends a user
+# JWT) and by pg_cron (which sends the service-role key). Keep JWT verification
+# OFF here so the cron service-role call isn't rejected; we identify the caller
+# ourselves inside the function for the scoped test.
+verify_jwt = false

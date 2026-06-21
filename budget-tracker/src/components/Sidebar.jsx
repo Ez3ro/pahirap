@@ -1,4 +1,5 @@
 import { NAV_ITEMS } from "../lib/nav"
+import NotificationToggle from "./NotificationToggle"
 
 export default function Sidebar({ view, onChange, email, onSignOut, open, onClose, collapsed, onToggleCollapsed }) {
   function handleNav(key) {
@@ -69,7 +70,8 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
         </nav>
 
         <div className="mt-4 border-t border-gray-800 pt-4">
-          <p className="truncate px-3 text-xs text-gray-500" title={email}>
+          <NotificationToggle />
+          <p className="mt-2 truncate px-3 text-xs text-gray-500" title={email}>
             {email}
           </p>
           <button

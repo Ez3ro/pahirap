@@ -26,4 +26,12 @@ export default defineConfig([
       'react-refresh/only-export-components': 'off',
     },
   },
+  {
+    // The push service worker runs in a service-worker context (self, registration,
+    // clients, atob…), not the React app, so give it those globals.
+    files: ['public/sw.js'],
+    languageOptions: {
+      globals: globals.serviceworker,
+    },
+  },
 ])

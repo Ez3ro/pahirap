@@ -13,6 +13,9 @@ node_modules/
 # Build output
 dist/
 dist-ssr/
+
+# Supabase CLI scratch (linked-project info, version caches) — machine-local
+supabase/.temp/
 build/
 
 # Environment files
