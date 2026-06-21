@@ -13,6 +13,7 @@ import Budget from "./views/Budget"
 import LentMoney from "./views/LentMoney"
 import { advanceDue } from "./lib/debts"
 import { DEFAULT_CATEGORIES, DEBT_CATEGORY } from "./lib/categories"
+import { triggerInstantCheck } from "./lib/notifications"
 
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
@@ -70,6 +71,11 @@ export default function App() {
       setError(error.message)
     } else {
       fetchTransactions()
+      // Nudge the push function to check budgets now, so an overspend pings you
+      // immediately rather than waiting for the next hourly cron run. Fire-and-
+      // forget: the server makes the real (de-duped) decision, and any failure
+      // here is swallowed so it never affects saving the transaction.
+      triggerInstantCheck()
     }
   }
 

@@ -65,6 +65,9 @@ function alertsForUser(
   salary: SalarySettings | null,
   now: { y: number; m: number; d: number; date: Date },
   seed: number,
+  // Praise ("doing fine") is a SCHEDULED nicety only — we don't want it firing on
+  // every transaction save (the instant recompute path), which would be weird.
+  allowPraise: boolean,
 ): Alert[] {
   const today = now.date
   const period = currentPeriod(today, salary)
@@ -125,6 +128,18 @@ function alertsForUser(
       body: fill(pickFrom(MESSAGES.periodOver, seed), { amount: money(monthly.spent - monthly.allowance) }),
       title: "⛽ Over budget",
     })
+  } else if (allowPraise && monthly.hasBudget) {
+    // Not over anything AND you actually have a budget set → a once-a-day snarky
+    // "you're doing fine" pat on the head. Dedupe by the day so the three runs send
+    // it at most once. (No budget = no praise; "good job not overspending nothing"
+    // makes no sense.) This is the only branch that can fire when you're NOT over,
+    // and the if/else chain guarantees it never sends alongside a roast.
+    alerts.push({
+      tag: "praise",
+      dedupeKey: `praise:${todayISO}`,
+      title: "✨ Budget check",
+      body: pickFrom(MESSAGES.praise, seed),
+    })
   }
 
   return alerts
@@ -169,40 +184,50 @@ Deno.serve(async (req) => {
   // Answer the browser's CORS preflight before doing anything else.
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS })
 
-  const now = manilaNow(new Date())
-  // A per-run seed so the rotating message lines vary day to day without random.
-  const seed = now.y * 372 + now.m * 31 + now.d
+  const ref = new Date()
+  const now = manilaNow(ref)
+  // A per-run seed so the rotating message lines vary. We fold in the hour as well
+  // as the date so the three daily runs (07:00/13:00/19:00 Manila) each pick a
+  // different line instead of repeating the same one all day. (Math.random() would
+  // also work here, but a deterministic seed keeps the same run reproducible.)
+  const seed = now.y * 372 + now.m * 31 + now.d + ref.getUTCHours() * 7
 
-  // Optional: POST { test: true } fires a one-off test push, bypassing the budget
-  // logic. When a logged-in user invokes it from the app we scope the test to just
-  // their own devices (testUserId); the cron caller has no user, so test mode there
-  // would hit everyone — but cron never sets test:true, so that can't happen.
+  // Three ways in:
+  //   { test: true }       — fire a one-off test push, bypassing budget logic.
+  //   { recompute: true }  — run the normal budget check NOW for the calling user
+  //                          only (the "instant on save" path). Same logic + same
+  //                          notification_log as cron, so the two never double-send.
+  //   {}                   — the scheduled cron run: budget check for ALL users.
   let testMode = false
-  let testUserId: string | null = null
+  let recomputeMode = false
   try {
     if (req.method === "POST") {
       const body = await req.json().catch(() => ({}))
       testMode = body?.test === true
+      recomputeMode = body?.recompute === true
     }
   } catch { /* ignore */ }
 
-  // Identify the caller (if a user JWT was sent) so a browser test only pings
-  // that user's devices, not the whole table.
-  if (testMode) {
+  // For the two user-initiated modes, identify the caller from their JWT so we
+  // only ever touch that user's devices, never the whole table.
+  let scopedUserId: string | null = null
+  if (testMode || recomputeMode) {
     const authHeader = req.headers.get("Authorization") || ""
     const token = authHeader.replace(/^Bearer\s+/i, "")
     if (token) {
       const { data: userData } = await supabase.auth.getUser(token)
-      testUserId = userData?.user?.id ?? null
+      scopedUserId = userData?.user?.id ?? null
     }
+    // A user-scoped call with no resolvable user is a no-op (don't fan out to all).
+    if (!scopedUserId) return json({ ok: true, sent: 0, note: "no authenticated user" })
   }
 
-  // Pull subscriptions. (Service role bypasses RLS.) A user-initiated test is
+  // Pull subscriptions. (Service role bypasses RLS.) User-initiated calls are
   // scoped to that user's own devices; the scheduled run covers everyone.
   let subsQuery = supabase
     .from("push_subscriptions")
     .select("endpoint, p256dh, auth, user_id")
-  if (testMode && testUserId) subsQuery = subsQuery.eq("user_id", testUserId)
+  if (scopedUserId) subsQuery = subsQuery.eq("user_id", scopedUserId)
   const { data: subs, error } = await subsQuery
   if (error) return json({ error: error.message }, 500)
 
@@ -226,7 +251,9 @@ Deno.serve(async (req) => {
         supabase.from("budget_limits").select("category, monthly_limit, cadence").eq("user_id", userId),
         supabase.from("salary_settings").select("*").eq("user_id", userId).maybeSingle(),
       ])
-      alerts = alertsForUser((txs ?? []) as Tx[], (limits ?? []) as BudgetLimit[], salary as SalarySettings | null, now, seed)
+      // Praise only on the scheduled cron run, not the instant on-save recompute.
+      const allowPraise = !recomputeMode
+      alerts = alertsForUser((txs ?? []) as Tx[], (limits ?? []) as BudgetLimit[], salary as SalarySettings | null, now, seed, allowPraise)
 
       // Drop any alert we've already sent this user (dedupe).
       if (alerts.length) {

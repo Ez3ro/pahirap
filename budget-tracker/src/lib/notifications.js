@@ -136,3 +136,17 @@ export async function isSubscribed() {
 function isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent)
 }
+
+// Ask the server to run the budget check for the current user RIGHT NOW (the
+// "instant on save" path). The function applies the same over-budget logic and
+// the same notification_log de-dupe as the scheduled cron, so calling this after
+// a transaction can't double-send with the hourly run. Best-effort and silent:
+// notifications are a nice-to-have, never block or error the save flow.
+export async function triggerInstantCheck() {
+  try {
+    if (!(await isSubscribed())) return // no point if this device isn't subscribed
+    await supabase.functions.invoke("send-push", { body: { recompute: true } })
+  } catch {
+    // Swallow — a failed nudge must never disrupt logging a transaction.
+  }
+}
