@@ -118,8 +118,11 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
       name: finalName,
       amount: numericAmount,
       type,
-      category: isExpense ? category : null,
     }
+    // Only expenses carry a spending category. For income we leave the column
+    // out entirely so the table's `default 'Other'` fills it — passing null
+    // explicitly would override the default and trip the not-null constraint.
+    if (isExpense) tx.category = category
     if (date) {
       const [y, m, d] = date.split("-").map(Number)
       tx.created_at = new Date(y, m - 1, d, 12, 0, 0).toISOString()
