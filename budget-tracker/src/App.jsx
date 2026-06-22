@@ -462,9 +462,18 @@ export default function App() {
     return () => listener.subscription.unsubscribe()
   }, [])
 
-  // Load (or clear) the user's data whenever the logged-in user changes.
+  // Load (or clear) the user's data whenever the logged-in USER changes.
+  //
+  // We key this on the user id, not the whole session object: Supabase fires
+  // onAuthStateChange (with a fresh session object) on every token refresh —
+  // including the refresh that happens the moment you reconnect after being
+  // offline. If we reloaded on the object identity, that refetch would race the
+  // offline-write flush and overwrite the optimistic rows before they sync,
+  // making the transaction vanish. Keying on the id means a refresh for the
+  // same user is a no-op here.
+  const userId = session?.user?.id ?? null
   useEffect(() => {
-    if (session) {
+    if (userId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchTransactions()
       fetchSalarySettings()
@@ -478,7 +487,8 @@ export default function App() {
       setBudgetLimits([])
       setLoans([])
     }
-  }, [session])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   // Flush queued offline writes. Triggered by three separate signals so we don't
   // miss reconnects on mobile: the `online` event, `visibilitychange` (app comes
@@ -486,33 +496,52 @@ export default function App() {
   // navigator.onLine directly rather than going through React state, which avoids
   // the timing gap between the browser event and the React state update.
   useEffect(() => {
-    if (!session) return
+    if (!userId) return
 
     async function tryFlush() {
       if (!navigator.onLine) return
       const pending = getPendingWrites()
       if (!pending.length) return
 
+      // Make sure the auth token is fresh before writing. On reconnect the JWT
+      // may have expired while offline; without this the very first insert can
+      // 401 and the write would be lost.
+      await supabase.auth.getSession()
+
       const failed = []
       for (const write of pending) {
+        // Supabase returns errors in the result object, not by throwing — so we
+        // must inspect `error`, not rely on try/catch, to know if a write stuck.
+        let result
         try {
           if (write.operation === 'insert') {
-            await supabase.from(write.table).insert([write.payload])
+            result = await supabase.from(write.table).insert([write.payload])
           } else if (write.operation === 'update') {
-            await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
+            result = await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
           } else if (write.operation === 'delete') {
-            await supabase.from(write.table).delete().eq('id', write.matchId)
+            result = await supabase.from(write.table).delete().eq('id', write.matchId)
           }
-        } catch {
-          failed.push(write)
+        } catch (e) {
+          result = { error: e }
+        }
+        if (result?.error) {
+          failed.push({ write, message: result.error.message || String(result.error) })
         }
       }
-      // Only clear what succeeded; leave failures in the queue for next attempt.
+
       if (failed.length > 0) {
-        localStorage.setItem('pahirap_pending_writes', JSON.stringify(failed))
-      } else {
-        clearPendingWrites()
+        // Keep the failed writes queued so the next trigger retries them, and
+        // surface the reason instead of silently dropping the transaction.
+        localStorage.setItem('pahirap_pending_writes', JSON.stringify(failed.map((f) => f.write)))
+        setError(`Couldn't sync ${failed.length} offline change${failed.length === 1 ? '' : 's'}: ${failed[0].message}. Will retry.`)
+        // Don't refetch — a refetch here would wipe the optimistic rows that
+        // haven't synced yet, making them disappear.
+        return
       }
+
+      clearPendingWrites()
+      // Everything synced — now it's safe to replace optimistic rows with the
+      // real server data.
       fetchTransactions()
       fetchDebts()
       fetchBudgetLimits()
@@ -532,7 +561,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisible)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session])
+  }, [userId])
 
   async function signOut() {
     if (session) clearUserCache(session.user.id)
