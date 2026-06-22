@@ -12,6 +12,21 @@
 const PREFIX = 'pahirap_cache_'
 const QUEUE_KEY = 'pahirap_pending_writes'
 
+// Optimistic rows created while offline get a temporary id (they have no real
+// database UUID yet). Prefix it distinctively so we can recognise these rows and
+// NEVER send the fake id to Supabase — a `uuid` column rejects "temp_…" with an
+// "invalid input syntax for type uuid" error.
+const TEMP_PREFIX = 'temp_'
+let tempCounter = 0
+export function newTempId() {
+  // Avoid Date.now() collisions when several rows are added in the same ms.
+  tempCounter += 1
+  return `${TEMP_PREFIX}${Date.now()}_${tempCounter}`
+}
+export function isTempId(id) {
+  return typeof id === 'string' && id.startsWith(TEMP_PREFIX)
+}
+
 // ── Read / write cache ────────────────────────────────────────────────────────
 
 export function saveCache(userId, key, data) {
@@ -62,4 +77,31 @@ export function getPendingWrites() {
 
 export function clearPendingWrites() {
   localStorage.removeItem(QUEUE_KEY)
+}
+
+function setPendingWrites(writes) {
+  if (writes.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(writes))
+  else clearPendingWrites()
+}
+
+// Editing a row that was created offline and hasn't synced yet: there's no DB
+// row, so we patch the queued insert's payload. Matched by the tempId we tagged
+// it with at queue time.
+export function updateQueuedInsert(table, tempId, fields) {
+  const q = getPendingWrites()
+  for (const w of q) {
+    if (w.table === table && w.operation === 'insert' && w.tempId === tempId) {
+      w.payload = { ...w.payload, ...fields }
+    }
+  }
+  setPendingWrites(q)
+}
+
+// Deleting an unsynced offline row: just drop its queued insert so it never
+// reaches the database.
+export function removeQueuedInsert(table, tempId) {
+  const q = getPendingWrites().filter(
+    (w) => !(w.table === table && w.operation === 'insert' && w.tempId === tempId)
+  )
+  setPendingWrites(q)
 }

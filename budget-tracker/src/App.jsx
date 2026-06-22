@@ -6,7 +6,7 @@ import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
 import { NAV_ITEMS } from "./lib/nav"
 import { useOnlineStatus } from "./lib/useOnlineStatus"
-import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites } from "./lib/offlineCache"
+import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites, newTempId, isTempId, updateQueuedInsert, removeQueuedInsert } from "./lib/offlineCache"
 import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
 import Income from "./views/Income"
@@ -82,9 +82,13 @@ export default function App() {
   // Returns true on success so callers (e.g. the add sheet) know whether to close.
   async function addTransaction(transaction) {
     if (!navigator.onLine) {
-      // Queue for sync on reconnect and show optimistically in the UI.
-      queueWrite({ table: 'transactions', operation: 'insert', payload: transaction })
-      const temp = { ...transaction, id: `temp_${Date.now()}`, created_at: new Date().toISOString() }
+      // Queue for sync on reconnect and show optimistically in the UI. The temp
+      // id is local-only — it never goes to Supabase (the insert payload has no
+      // id, so the DB assigns a real UUID on flush). We tag the queued write with
+      // the same tempId so a later offline edit/delete can find and amend it.
+      const tempId = newTempId()
+      queueWrite({ table: 'transactions', operation: 'insert', payload: transaction, tempId })
+      const temp = { ...transaction, id: tempId, created_at: new Date().toISOString() }
       setTransactions((prev) => [temp, ...prev])
       return true
     }
@@ -99,6 +103,14 @@ export default function App() {
   }
 
   async function deleteTransaction(id) {
+    // An unsynced offline row only exists locally + as a queued insert. Sending
+    // its temp id to Supabase would error ("invalid input syntax for type
+    // uuid"), so just drop it from the queue and the UI.
+    if (isTempId(id)) {
+      removeQueuedInsert('transactions', id)
+      setTransactions((prev) => prev.filter((t) => t.id !== id))
+      return
+    }
     const { error } = await supabase.from("transactions").delete().eq("id", id)
     if (error) {
       setError(error.message)
@@ -108,6 +120,14 @@ export default function App() {
   }
 
   async function updateTransaction(id, fields) {
+    // Editing a not-yet-synced offline row: there's no DB row to update, so
+    // amend the queued insert payload and the local row instead. When it finally
+    // syncs, the edited values are what get inserted.
+    if (isTempId(id)) {
+      updateQueuedInsert('transactions', id, fields)
+      setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...fields } : t)))
+      return
+    }
     const { error } = await supabase.from("transactions").update(fields).eq("id", id)
     if (error) setError(error.message)
     else fetchTransactions()
@@ -490,73 +510,114 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId])
 
-  // Flush queued offline writes. Triggered by three separate signals so we don't
-  // miss reconnects on mobile: the `online` event, `visibilitychange` (app comes
-  // to foreground), and whenever the session loads. All three check
-  // navigator.onLine directly rather than going through React state, which avoids
+  // Flush queued offline writes. Triggered by several signals so we don't miss
+  // reconnects on mobile: the `online` event, `visibilitychange` (app comes to
+  // foreground), session load, and an automatic retry timer. All check
+  // navigator.onLine directly rather than going through React state, avoiding
   // the timing gap between the browser event and the React state update.
   useEffect(() => {
     if (!userId) return
 
+    // iOS Safari fires `online` a beat before the network is actually usable, so
+    // the first fetch after reconnect often dies with "Load failed". We treat
+    // that as transient and retry on a short backoff rather than surfacing it.
+    let flushing = false        // re-entrancy guard (triggers can overlap)
+    let retryTimer = null
+    let attempt = 0
+    const BACKOFFS = [1000, 3000, 6000, 12000] // ms
+
+    // A failure we should retry (network not ready) vs. report (real rejection,
+    // e.g. a constraint violation — retrying the same payload won't help).
+    function isTransient(message) {
+      const m = (message || '').toLowerCase()
+      return (
+        m.includes('load failed') ||   // Safari network failure
+        m.includes('failed to fetch') || // Chrome/Firefox equivalent
+        m.includes('networkerror') ||
+        m.includes('network request failed') ||
+        m.includes('timeout') ||
+        m.includes('jwt') || m.includes('token') // token not refreshed yet
+      )
+    }
+
     async function tryFlush() {
-      if (!navigator.onLine) return
+      if (flushing || !navigator.onLine) return
       const pending = getPendingWrites()
       if (!pending.length) return
+      flushing = true
 
-      // Make sure the auth token is fresh before writing. On reconnect the JWT
-      // may have expired while offline; without this the very first insert can
-      // 401 and the write would be lost.
-      await supabase.auth.getSession()
+      try {
+        // Refresh the token first — on reconnect the JWT may have expired offline.
+        try { await supabase.auth.getSession() } catch { /* retried below */ }
 
-      const failed = []
-      for (const write of pending) {
-        // Supabase returns errors in the result object, not by throwing — so we
-        // must inspect `error`, not rely on try/catch, to know if a write stuck.
-        let result
-        try {
-          if (write.operation === 'insert') {
-            result = await supabase.from(write.table).insert([write.payload])
-          } else if (write.operation === 'update') {
-            result = await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
-          } else if (write.operation === 'delete') {
-            result = await supabase.from(write.table).delete().eq('id', write.matchId)
+        const stillFailing = []
+        let hardError = null
+        for (const write of pending) {
+          // Supabase reports failures in the result object, not by throwing — but
+          // a dead network DOES throw, so we handle both.
+          let result
+          try {
+            if (write.operation === 'insert') {
+              result = await supabase.from(write.table).insert([write.payload])
+            } else if (write.operation === 'update') {
+              result = await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
+            } else if (write.operation === 'delete') {
+              result = await supabase.from(write.table).delete().eq('id', write.matchId)
+            }
+          } catch (e) {
+            result = { error: e }
           }
-        } catch (e) {
-          result = { error: e }
+          if (result?.error) {
+            const message = result.error.message || String(result.error)
+            stillFailing.push(write)
+            if (!isTransient(message)) hardError = message // a real, non-retryable error
+          }
         }
-        if (result?.error) {
-          failed.push({ write, message: result.error.message || String(result.error) })
+
+        if (stillFailing.length > 0) {
+          localStorage.setItem('pahirap_pending_writes', JSON.stringify(stillFailing))
+          if (hardError) {
+            // Won't fix itself — tell the user and stop the retry loop.
+            setError(`Couldn't sync an offline change: ${hardError}`)
+          } else {
+            // Transient network blip — schedule an automatic retry, no scary error.
+            setError(null)
+            if (attempt < BACKOFFS.length) {
+              const delay = BACKOFFS[attempt++]
+              clearTimeout(retryTimer)
+              retryTimer = setTimeout(() => { flushing = false; tryFlush() }, delay)
+              flushing = false
+              return
+            }
+          }
+          flushing = false
+          return // don't refetch — would wipe unsynced optimistic rows
         }
-      }
 
-      if (failed.length > 0) {
-        // Keep the failed writes queued so the next trigger retries them, and
-        // surface the reason instead of silently dropping the transaction.
-        localStorage.setItem('pahirap_pending_writes', JSON.stringify(failed.map((f) => f.write)))
-        setError(`Couldn't sync ${failed.length} offline change${failed.length === 1 ? '' : 's'}: ${failed[0].message}. Will retry.`)
-        // Don't refetch — a refetch here would wipe the optimistic rows that
-        // haven't synced yet, making them disappear.
-        return
+        // Success: reset retry state, clear the queue, replace optimistic rows.
+        attempt = 0
+        clearTimeout(retryTimer)
+        clearPendingWrites()
+        setError(null)
+        fetchTransactions()
+        fetchDebts()
+        fetchBudgetLimits()
+        fetchLoans()
+      } finally {
+        flushing = false
       }
-
-      clearPendingWrites()
-      // Everything synced — now it's safe to replace optimistic rows with the
-      // real server data.
-      fetchTransactions()
-      fetchDebts()
-      fetchBudgetLimits()
-      fetchLoans()
     }
 
     // Run immediately — catches pending writes from a previous offline session.
     tryFlush()
 
-    function onOnline() { tryFlush() }
-    function onVisible() { if (!document.hidden) tryFlush() }
+    function onOnline() { attempt = 0; tryFlush() }
+    function onVisible() { if (!document.hidden) { attempt = 0; tryFlush() } }
 
     window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
+      clearTimeout(retryTimer)
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)
     }
