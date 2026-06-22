@@ -480,13 +480,20 @@ export default function App() {
     }
   }, [session])
 
-  // Flush queued offline writes the moment connectivity returns.
+  // Flush queued offline writes. Triggered by three separate signals so we don't
+  // miss reconnects on mobile: the `online` event, `visibilitychange` (app comes
+  // to foreground), and whenever the session loads. All three check
+  // navigator.onLine directly rather than going through React state, which avoids
+  // the timing gap between the browser event and the React state update.
   useEffect(() => {
-    if (!isOnline || !session) return
-    const pending = getPendingWrites()
-    if (!pending.length) return
+    if (!session) return
 
-    async function flush() {
+    async function tryFlush() {
+      if (!navigator.onLine) return
+      const pending = getPendingWrites()
+      if (!pending.length) return
+
+      const failed = []
       for (const write of pending) {
         try {
           if (write.operation === 'insert') {
@@ -497,20 +504,35 @@ export default function App() {
             await supabase.from(write.table).delete().eq('id', write.matchId)
           }
         } catch {
-          // A single failed write shouldn't block the rest.
+          failed.push(write)
         }
       }
-      clearPendingWrites()
-      // Refetch everything so optimistic temp items are replaced with real data.
+      // Only clear what succeeded; leave failures in the queue for next attempt.
+      if (failed.length > 0) {
+        localStorage.setItem('pahirap_pending_writes', JSON.stringify(failed))
+      } else {
+        clearPendingWrites()
+      }
       fetchTransactions()
       fetchDebts()
       fetchBudgetLimits()
       fetchLoans()
     }
 
-    flush()
+    // Run immediately — catches pending writes from a previous offline session.
+    tryFlush()
+
+    function onOnline() { tryFlush() }
+    function onVisible() { if (!document.hidden) tryFlush() }
+
+    window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOnline, session])
+  }, [session])
 
   async function signOut() {
     if (session) clearUserCache(session.user.id)
