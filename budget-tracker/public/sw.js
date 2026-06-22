@@ -26,10 +26,10 @@ self.addEventListener("push", (event) => {
     payload = event.data ? event.data.json() : {}
   } catch {
     // Fall back to treating the raw push body as the notification text.
-    payload = { title: "Budget Tracker", body: event.data ? event.data.text() : "" }
+    payload = { title: "Payday Budget Planner", body: event.data ? event.data.text() : "" }
   }
 
-  const title = payload.title || "Budget Tracker"
+  const title = payload.title || "Payday Budget Planner"
   const options = {
     body: payload.body || "",
     // tag collapses repeats: a newer alert of the same kind replaces the old one

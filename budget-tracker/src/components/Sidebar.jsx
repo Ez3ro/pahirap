@@ -50,7 +50,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
           </svg>
         </button>
 
-        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Budget Tracker</h1>
+        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Payday Budget Planner</h1>
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (

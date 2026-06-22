@@ -1,7 +1,7 @@
 {
-  "name": "Budget Tracker",
-  "short_name": "Budget",
-  "description": "Personal budget tracker — rings, pay-day periods, debts.",
+  "name": "Payday Budget Planner",
+  "short_name": "Payday",
+  "description": "Payday-to-payday budget planner — rings, pay-day periods, debts.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
