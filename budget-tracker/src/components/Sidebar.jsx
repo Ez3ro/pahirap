@@ -20,13 +20,18 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r border-gray-800 bg-gray-950 p-4
+          fixed inset-y-0 left-0 z-30 flex w-64 flex-col overflow-hidden border-r border-gray-800 bg-gray-950
           transition-transform duration-300 ease-in-out
           ${open ? "translate-x-0" : "-translate-x-full"}
-          md:w-56 md:transition-none
-          ${collapsed ? "md:hidden" : "md:relative md:translate-x-0"}
+          md:relative md:translate-x-0
+          md:transition-[width] md:duration-300 md:ease-in-out
+          ${collapsed ? "md:w-0 md:border-r-0" : "md:w-56"}
         `}
       >
+        {/* Fixed-width inner panel: the <aside> animates its width to 0 on
+            desktop collapse, and this panel keeps its size so the content slides
+            out cleanly under overflow-hidden instead of reflowing mid-animation. */}
+        <div className="flex h-full w-64 flex-col p-4 md:w-56">
         {/* Close button — mobile only */}
         <button
           onClick={onClose}
@@ -50,7 +55,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
           </svg>
         </button>
 
-        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Payday Budget Planner</h1>
+        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (
@@ -80,6 +85,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
           >
             Sign out
           </button>
+        </div>
         </div>
       </aside>
     </>

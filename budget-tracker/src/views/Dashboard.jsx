@@ -108,7 +108,6 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   const lentActive = loans.filter((l) => !l.written_off && Number(l.amount_paid) < Number(l.amount))
   const lentActiveOutstanding = lentActive.reduce((s, l) => s + outstandingOf(l), 0)
 
-  const [budgetExpanded, setBudgetExpanded] = useState(false)
   const [todayExpanded, setTodayExpanded] = useState(false)
   const [ringTf, setRingTf] = useState("daily")
 
@@ -301,18 +300,12 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                     : `${formatMoney(Math.max(0, totalBudget - spendingTotal))} left · ${budgetPct}%`}
                 </p>
 
-                {/* Per-category breakdown — collapsible */}
+                {/* Per-category breakdown — always shown; scrolls internally past
+                    ~5 rows so the card never grows unbounded. */}
                 {catRows.length > 0 && (
                   <div className="mt-3 border-t border-border pt-2">
-                    <button
-                      onClick={() => setBudgetExpanded((v) => !v)}
-                      className="flex w-full items-center justify-between py-1 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      <span>Categories</span>
-                      <span>{budgetExpanded ? "▲" : "▼"}</span>
-                    </button>
-                    {budgetExpanded && (
-                      <div className="mt-2 space-y-2">
+                    <p className="py-1 text-xs text-muted-foreground">Categories</p>
+                    <div className="mt-2 max-h-44 space-y-2 overflow-y-auto pr-1">
                         {catRows.map(({ category, limit, spent }) => {
                           const remaining = limit > 0 ? limit - spent : null
                           const isOver    = remaining !== null && remaining < 0
@@ -336,8 +329,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                             </div>
                           )
                         })}
-                      </div>
-                    )}
+                    </div>
                   </div>
                 )}
               </CardContent>
