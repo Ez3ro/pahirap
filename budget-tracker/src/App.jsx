@@ -6,6 +6,7 @@ import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
 import { NAV_ITEMS } from "./lib/nav"
 import { useOnlineStatus } from "./lib/useOnlineStatus"
+import { usePullToRefresh } from "./lib/usePullToRefresh"
 import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites, newTempId, isTempId, updateQueuedInsert, removeQueuedInsert, isNetworkError, replayWrite } from "./lib/offlineCache"
 import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
@@ -682,6 +683,21 @@ export default function App() {
     await supabase.auth.signOut()
   }
 
+  // Pull-to-refresh: re-pull everything from the server. Runs in parallel so the
+  // spinner doesn't drag on. (The flush effect already handles syncing queued
+  // offline writes; this is purely a manual "get me the latest" gesture.)
+  async function refreshAll() {
+    await Promise.all([
+      fetchTransactions(),
+      fetchSalarySettings(),
+      fetchDebts(),
+      fetchBudgetLimits(),
+      fetchLoans(),
+    ])
+  }
+
+  const { containerRef: scrollRef, distance: pullDistance, refreshing: pullRefreshing, threshold: pullThreshold } = usePullToRefresh(refreshAll)
+
   // Still checking the session — show nothing rather than a flash of the login form.
   if (!authReady) {
     return (
@@ -782,7 +798,25 @@ export default function App() {
         onToggleCollapsed={toggleSidebarCollapsed}
       />
 
-      <main className="flex-1 overflow-y-auto">
+      <main ref={scrollRef} className="relative flex-1 overflow-y-auto">
+        {/* Pull-to-refresh indicator — a spinner that follows the finger on
+            mobile, then spins while data reloads. Hidden at rest (distance 0). */}
+        {pullDistance > 0 && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center"
+            style={{ transform: `translateY(${pullDistance - 28}px)`, transition: pullRefreshing ? "none" : "transform 0.15s ease-out" }}
+          >
+            <div className="rounded-full bg-gray-800 p-2 shadow-lg">
+              <svg
+                className={`h-5 w-5 text-blue-400 ${pullRefreshing ? "animate-spin" : ""}`}
+                style={pullRefreshing ? undefined : { transform: `rotate(${(pullDistance / pullThreshold) * 270}deg)` }}
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            </div>
+          </div>
+        )}
         {!isOnline && (
           <div className="flex items-center gap-2 border-b border-amber-700/40 bg-amber-950/60 px-6 py-2 text-sm text-amber-300">
             <span>●</span>

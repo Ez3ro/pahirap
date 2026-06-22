@@ -20,7 +20,7 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card"
-import { formatMoney, formatMonthYear } from "@/lib/format"
+import { formatMoney, formatMoneyCompact, formatMonthYear } from "@/lib/format"
 import { summariseDebts, startOfDay, killOrder, payoffDate, formatMonthsLeft, isDueInWindow, summariseDebtsByType, debtType } from "@/lib/debts"
 import { categoryIcon, categoryColor, isDebtPayment } from "@/lib/categories"
 import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod } from "@/lib/period"
@@ -221,7 +221,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                   <CardDescription className="text-red-500/70">{periodLabel}</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-2xl font-semibold text-red-200">{formatMoney(dueThisPeriod)}</p>
+                  <p className="max-w-full truncate text-2xl font-semibold text-red-200" title={formatMoney(dueThisPeriod)}>{formatMoneyCompact(dueThisPeriod)}</p>
                   <p className="mt-1 text-xs text-red-500">
                     Recurring debts due before the next payday
                   </p>
@@ -256,9 +256,9 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
               </CardHeader>
               <CardContent>
                 {/* Spent this period vs the budget. The % and bar show what's LEFT. */}
-                <p className="text-2xl font-bold">{formatMoney(spendingTotal)}</p>
+                <p className="max-w-full truncate text-2xl font-bold" title={formatMoney(spendingTotal)}>{formatMoneyCompact(spendingTotal)}</p>
                 <p className="text-sm text-muted-foreground">
-                  spent of {formatMoney(totalBudget)} budgeted
+                  spent of {formatMoneyCompact(totalBudget)} budgeted
                 </p>
                 <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
                   <div
@@ -350,8 +350,11 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                       {/* Hero: budget left for this window (distinct from the headline's
                           cash "safe to spend"). Goes to "over" when negative; the numbers
                           reconcile — spent + this = the window budget below. */}
-                      <p className={`mt-3 text-3xl font-bold ${ring.over ? "text-red-400" : "text-green-400"}`}>
-                        {ring.over ? `${formatMoney(Math.abs(ring.remaining))} over` : formatMoney(ring.remaining)}
+                      <p
+                        className={`mt-3 max-w-full truncate text-3xl font-bold ${ring.over ? "text-red-400" : "text-green-400"}`}
+                        title={ring.over ? `${formatMoney(Math.abs(ring.remaining))} over` : formatMoney(ring.remaining)}
+                      >
+                        {ring.over ? `${formatMoneyCompact(Math.abs(ring.remaining))} over` : formatMoneyCompact(ring.remaining)}
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {ring.over ? `over ${ring.label}'s budget` : `left in ${ring.label}'s budget`}
@@ -556,7 +559,15 @@ function StatCard({ label, value, tone = "text-foreground", note = null }) {
     <Card>
       <CardHeader>
         <CardDescription>{label}</CardDescription>
-        <CardTitle className={`text-2xl ${tone}`}>{formatMoney(value)}</CardTitle>
+        {/* Compact (₱100K/₱1.2M) so big figures never overflow the card; the
+            exact value is in the tooltip. truncate keeps it on one line and
+            clips with an ellipsis rather than spilling past the card edge. */}
+        <CardTitle
+          className={`block max-w-full truncate text-2xl ${tone}`}
+          title={formatMoney(value)}
+        >
+          {formatMoneyCompact(value)}
+        </CardTitle>
         {note && <p className="text-xs text-muted-foreground">{note}</p>}
       </CardHeader>
     </Card>
