@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { supabase } from "../lib/supabase"
 import { useInstallPrompt } from "../lib/useInstallPrompt"
+import InstallButton from "./InstallButton"
 
 // Some apps (Messenger, Instagram, Facebook, TikTok, WeChat, etc.) open links in
 // an embedded "in-app browser". Google refuses its OAuth sign-in there with a
@@ -58,7 +59,9 @@ export default function Auth() {
 
   // In an embedded in-app browser, Google OAuth is blocked — warn and offer alternatives.
   const inApp = isInAppBrowser()
-  const { canInstall, isIOS, install } = useInstallPrompt()
+  // Only show the install pitch when the app is actually installable here
+  // (a pending Android prompt or an iOS Safari session).
+  const { canInstall, isIOS } = useInstallPrompt()
 
   return (
     // Mobile: a single non-scrolling screen (h-screen + overflow-hidden), tightened
@@ -93,25 +96,13 @@ export default function Auth() {
           </div>
 
           {/* Install prompt — sits between the pitch and the login card so new
-              users see it before they've signed up. Android shows a real button;
-              iOS shows the Share hint (no prompt API on iOS). */}
+              users see it before they've signed up. Android fires the native
+              prompt; iOS opens a short visual Add-to-Home-Screen guide. */}
           {(canInstall || isIOS) && (
             <div className="mt-4 rounded-xl border border-blue-700/40 bg-blue-950/40 p-4">
               <p className="text-sm font-medium text-blue-300">Works as a phone app</p>
               <p className="mt-0.5 text-xs text-blue-400/80">No App Store needed — installs straight from your browser.</p>
-              {canInstall && (
-                <button
-                  onClick={install}
-                  className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
-                >
-                  Install app
-                </button>
-              )}
-              {isIOS && (
-                <p className="mt-2 text-xs text-blue-400/80">
-                  Tap the <span className="font-semibold text-blue-300">Share</span> button in Safari, then &quot;Add to Home Screen&quot;.
-                </p>
-              )}
+              <InstallButton className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500" />
             </div>
           )}
 

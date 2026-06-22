@@ -1,9 +1,8 @@
 import { NAV_ITEMS } from "../lib/nav"
 import NotificationToggle from "./NotificationToggle"
-import { useInstallPrompt } from "../lib/useInstallPrompt"
+import InstallButton from "./InstallButton"
 
 export default function Sidebar({ view, onChange, email, onSignOut, open, onClose, collapsed, onToggleCollapsed }) {
-  const { canInstall, isIOS, install } = useInstallPrompt()
   function handleNav(key) {
     onChange(key)
     onClose()
@@ -59,19 +58,9 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
 
         <h1 className="mb-4 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
 
-        {canInstall && (
-          <button
-            onClick={install}
-            className="mb-4 w-full rounded-lg border border-blue-700/50 bg-blue-950/40 px-3 py-2 text-sm text-blue-300 hover:bg-blue-900/40"
-          >
-            Install app
-          </button>
-        )}
-        {isIOS && (
-          <p className="mb-4 px-1 text-xs leading-relaxed text-gray-500">
-            To install: tap <span className="font-medium text-gray-400">Share</span> → &quot;Add to Home Screen&quot;
-          </p>
-        )}
+        <div className="mb-4">
+          <InstallButton />
+        </div>
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (
