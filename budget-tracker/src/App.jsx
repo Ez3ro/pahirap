@@ -6,7 +6,7 @@ import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
 import { NAV_ITEMS } from "./lib/nav"
 import { useOnlineStatus } from "./lib/useOnlineStatus"
-import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites, newTempId, isTempId, updateQueuedInsert, removeQueuedInsert } from "./lib/offlineCache"
+import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites, newTempId, isTempId, updateQueuedInsert, removeQueuedInsert, isNetworkError, replayWrite } from "./lib/offlineCache"
 import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
 import Income from "./views/Income"
@@ -54,6 +54,47 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // One wrapper for every mutation, so offline behaviour is uniform.
+  //
+  // It tries the live Supabase call first. If that fails because the NETWORK is
+  // unreachable (a thrown fetch error, or navigator.onLine === false), it queues
+  // the operation for later sync and runs the optimistic local update so the UI
+  // updates immediately. A real server rejection (constraint, auth, etc.) is
+  // surfaced as an error and NOT queued — retrying it wouldn't help.
+  //
+  // spec: {
+  //   write,            // a queued-write descriptor: { table, operation, payload?, match?, onConflict?, tempId? }
+  //   optimistic,       // () => void — apply the change to local state right now
+  //   onSynced,         // optional () => void — run after a successful LIVE write (e.g. refetch)
+  // }
+  // Returns true if it went through or was queued, false on a hard error.
+  async function runWrite({ write, optimistic, onSynced }) {
+    try {
+      const { error } = await replayWrite(supabase, write)
+      if (error) {
+        if (isNetworkError(error)) {
+          queueWrite(write)
+          optimistic?.()
+          setError(null)
+          return true
+        }
+        setError(error.message)
+        return false
+      }
+      onSynced?.()
+      return true
+    } catch (e) {
+      if (isNetworkError(e)) {
+        queueWrite(write)
+        optimistic?.()
+        setError(null)
+        return true
+      }
+      setError(e.message || String(e))
+      return false
+    }
+  }
+
   async function fetchTransactions() {
     setLoading(true)
     if (!navigator.onLine) {
@@ -81,25 +122,19 @@ export default function App() {
 
   // Returns true on success so callers (e.g. the add sheet) know whether to close.
   async function addTransaction(transaction) {
-    if (!navigator.onLine) {
-      // Queue for sync on reconnect and show optimistically in the UI. The temp
-      // id is local-only — it never goes to Supabase (the insert payload has no
-      // id, so the DB assigns a real UUID on flush). We tag the queued write with
-      // the same tempId so a later offline edit/delete can find and amend it.
-      const tempId = newTempId()
-      queueWrite({ table: 'transactions', operation: 'insert', payload: transaction, tempId })
-      const temp = { ...transaction, id: tempId, created_at: new Date().toISOString() }
-      setTransactions((prev) => [temp, ...prev])
-      return true
-    }
-    const { error } = await supabase.from("transactions").insert([transaction])
-    if (error) {
-      setError(error.message)
-      return false
-    }
-    fetchTransactions()
-    triggerInstantCheck()
-    return true
+    // The temp id is local-only — it never goes to Supabase (the insert payload
+    // has no id, so the DB assigns a real UUID on sync). We tag the queued write
+    // with the same tempId so a later offline edit/delete can find and amend it.
+    const tempId = newTempId()
+    const ok = await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: transaction, tempId },
+      optimistic: () => {
+        const temp = { ...transaction, id: tempId, created_at: new Date().toISOString() }
+        setTransactions((prev) => [temp, ...prev])
+      },
+      onSynced: () => { fetchTransactions(); triggerInstantCheck() },
+    })
+    return ok
   }
 
   async function deleteTransaction(id) {
@@ -111,12 +146,11 @@ export default function App() {
       setTransactions((prev) => prev.filter((t) => t.id !== id))
       return
     }
-    const { error } = await supabase.from("transactions").delete().eq("id", id)
-    if (error) {
-      setError(error.message)
-    } else {
-      setTransactions((prev) => prev.filter((t) => t.id !== id))
-    }
+    await runWrite({
+      write: { table: 'transactions', operation: 'delete', match: { id } },
+      optimistic: () => setTransactions((prev) => prev.filter((t) => t.id !== id)),
+      onSynced: () => setTransactions((prev) => prev.filter((t) => t.id !== id)),
+    })
   }
 
   async function updateTransaction(id, fields) {
@@ -128,9 +162,11 @@ export default function App() {
       setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...fields } : t)))
       return
     }
-    const { error } = await supabase.from("transactions").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchTransactions()
+    await runWrite({
+      write: { table: 'transactions', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...fields } : t))),
+      onSynced: () => fetchTransactions(),
+    })
   }
 
   async function fetchSalarySettings() {
@@ -153,85 +189,50 @@ export default function App() {
     }
   }
 
-  async function saveSalarySettings({ periodA, periodB, paydayA, paydayB }) {
-    // upsert = insert a row, or update it if one already exists for this user
-    // (user_id is the primary key, so onConflict targets it).
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          period_a_amount: periodA,
-          period_b_amount: periodB,
-          payday_a: paydayA,
-          payday_b: paydayB,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
+  // Persist a partial change to the single salary_settings row (one per user,
+  // keyed by user_id). Goes through runWrite so it queues offline; the optimistic
+  // update merges `fields` into the current settings so the UI reflects it now.
+  async function saveSalaryFields(fields) {
+    const payload = { user_id: session.user.id, ...fields, updated_at: new Date().toISOString() }
+    await runWrite({
+      write: { table: 'salary_settings', operation: 'upsert', payload, onConflict: 'user_id' },
+      optimistic: () => setSalarySettings((prev) => ({ ...(prev || { user_id: session.user.id }), ...fields })),
+      onSynced: () => fetchSalarySettings(),
+    })
+  }
 
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+  async function saveSalarySettings({ periodA, periodB, paydayA, paydayB }) {
+    await saveSalaryFields({
+      period_a_amount: periodA,
+      period_b_amount: periodB,
+      payday_a: paydayA,
+      payday_b: paydayB,
+    })
   }
 
   async function skipPayday(dateISO) {
     // Mark a payday as "didn't get paid" by appending it to the skip list.
-    // upsert only touches the columns we pass, so the amounts are left alone.
     const current = salarySettings?.skipped_paydays ?? []
     if (current.includes(dateISO)) return
-
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          skipped_paydays: [...current, dateISO],
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
-
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+    await saveSalaryFields({ skipped_paydays: [...current, dateISO] })
   }
 
   async function unskipPayday(dateISO) {
     // Undo a skip: drop the date from the skip list.
     const current = salarySettings?.skipped_paydays ?? []
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          skipped_paydays: current.filter((d) => d !== dateISO),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
-
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+    await saveSalaryFields({ skipped_paydays: current.filter((d) => d !== dateISO) })
   }
 
   async function recordSalary({ dateISO, amount, label }) {
     // paid_for tags this as the salary for a specific payday. The unique index
     // means a second attempt at the same payday will error instead of duplicating.
-    const { error } = await supabase.from("transactions").insert([
-      {
-        name: `Salary (${label})`,
-        amount,
-        type: "income",
-        paid_for: dateISO,
-      },
-    ])
-    if (error) setError(error.message)
-    else fetchTransactions()
+    const row = { name: `Salary (${label})`, amount, type: "income", paid_for: dateISO }
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: row, tempId },
+      optimistic: () => setTransactions((prev) => [{ ...row, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchTransactions(),
+    })
   }
 
   async function fetchDebts() {
@@ -256,21 +257,38 @@ export default function App() {
   }
 
   async function addDebt(debt) {
-    const { error } = await supabase.from("debts").insert([debt])
-    if (error) setError(error.message)
-    else fetchDebts()
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'debts', operation: 'insert', payload: debt, tempId },
+      optimistic: () => setDebts((prev) => [{ ...debt, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchDebts(),
+    })
   }
 
   async function deleteDebt(id) {
-    const { error } = await supabase.from("debts").delete().eq("id", id)
-    if (error) setError(error.message)
-    else setDebts((prev) => prev.filter((d) => d.id !== id))
+    if (isTempId(id)) {
+      removeQueuedInsert('debts', id)
+      setDebts((prev) => prev.filter((d) => d.id !== id))
+      return
+    }
+    await runWrite({
+      write: { table: 'debts', operation: 'delete', match: { id } },
+      optimistic: () => setDebts((prev) => prev.filter((d) => d.id !== id)),
+      onSynced: () => setDebts((prev) => prev.filter((d) => d.id !== id)),
+    })
   }
 
   async function updateDebt(id, fields) {
-    const { error } = await supabase.from("debts").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchDebts()
+    if (isTempId(id)) {
+      updateQueuedInsert('debts', id, fields)
+      setDebts((prev) => prev.map((d) => (d.id === id ? { ...d, ...fields } : d)))
+      return
+    }
+    await runWrite({
+      write: { table: 'debts', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setDebts((prev) => prev.map((d) => (d.id === id ? { ...d, ...fields } : d))),
+      onSynced: () => fetchDebts(),
+    })
   }
 
   async function fetchBudgetLimits() {
@@ -306,54 +324,56 @@ export default function App() {
     saveCache(session.user.id, 'budget_limits', data)
   }
 
+  // Budget limits are keyed by (user_id, category) — there's no separate row id we
+  // act on, so offline edits match on those columns and the optimistic update
+  // patches the matching category row in local state. No temp-id dance needed.
+  const uid = () => session.user.id
+
+  function patchLimit(category, fields) {
+    setBudgetLimits((prev) => {
+      const exists = prev.some((b) => b.category === category)
+      if (exists) return prev.map((b) => (b.category === category ? { ...b, ...fields } : b))
+      return [...prev, { user_id: uid(), category, monthly_limit: 0, ...fields }]
+    })
+  }
+
   async function saveBudgetLimit(category, limit) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .upsert(
-        { user_id: session.user.id, category, monthly_limit: limit },
-        { onConflict: "user_id,category" }
-      )
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'upsert', payload: { user_id: uid(), category, monthly_limit: limit }, onConflict: 'user_id,category' },
+      optimistic: () => patchLimit(category, { monthly_limit: limit }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Toggle whether a category takes part in the auto-budget. Off = the auto-split
   // skips it and shares its money among the rest.
   async function setCategoryAutoBudget(category, autoBudget) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .update({ auto_budget: autoBudget })
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'update', payload: { auto_budget: autoBudget }, match: { user_id: uid(), category } },
+      optimistic: () => patchLimit(category, { auto_budget: autoBudget }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Set how often a category's budget resets (daily / weekly / monthly).
   async function setCategoryCadence(category, cadence) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .update({ cadence })
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'update', payload: { cadence }, match: { user_id: uid(), category } },
+      optimistic: () => patchLimit(category, { cadence }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Apply an auto-budget: write a batch of { category, monthly_limit } rows in one
   // upsert. Used by the Budget page's "Apply suggested budget" button.
   async function applyBudgetLimits(rows) {
     if (!rows.length) return
-    const { error } = await supabase.from("budget_limits").upsert(
-      rows.map((r) => ({
-        user_id: session.user.id,
-        category: r.category,
-        monthly_limit: r.monthly_limit,
-      })),
-      { onConflict: "user_id,category" }
-    )
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    const payload = rows.map((r) => ({ user_id: uid(), category: r.category, monthly_limit: r.monthly_limit }))
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'upsert', payload, onConflict: 'user_id,category' },
+      optimistic: () => { for (const r of rows) patchLimit(r.category, { monthly_limit: r.monthly_limit }) },
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function addBudgetCategory(name) {
@@ -363,21 +383,19 @@ export default function App() {
       setError(`"${DEBT_CATEGORY}" is reserved for debt payments and can't be a budget category.`)
       return
     }
-    const { error } = await supabase
-      .from("budget_limits")
-      .insert({ user_id: session.user.id, category: name, monthly_limit: 0 })
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'insert', payload: { user_id: uid(), category: name, monthly_limit: 0 } },
+      optimistic: () => patchLimit(name, { monthly_limit: 0 }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function removeBudgetCategory(category) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .delete()
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'delete', match: { user_id: uid(), category } },
+      optimistic: () => setBudgetLimits((prev) => prev.filter((b) => b.category !== category)),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function fetchLoans() {
@@ -401,21 +419,38 @@ export default function App() {
   }
 
   async function addLoan(loan) {
-    const { error } = await supabase.from("loans").insert([loan])
-    if (error) setError(error.message)
-    else fetchLoans()
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'loans', operation: 'insert', payload: loan, tempId },
+      optimistic: () => setLoans((prev) => [{ ...loan, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchLoans(),
+    })
   }
 
   async function updateLoan(id, fields) {
-    const { error } = await supabase.from("loans").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchLoans()
+    if (isTempId(id)) {
+      updateQueuedInsert('loans', id, fields)
+      setLoans((prev) => prev.map((l) => (l.id === id ? { ...l, ...fields } : l)))
+      return
+    }
+    await runWrite({
+      write: { table: 'loans', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setLoans((prev) => prev.map((l) => (l.id === id ? { ...l, ...fields } : l))),
+      onSynced: () => fetchLoans(),
+    })
   }
 
   async function deleteLoan(id) {
-    const { error } = await supabase.from("loans").delete().eq("id", id)
-    if (error) setError(error.message)
-    else setLoans((prev) => prev.filter((l) => l.id !== id))
+    if (isTempId(id)) {
+      removeQueuedInsert('loans', id)
+      setLoans((prev) => prev.filter((l) => l.id !== id))
+      return
+    }
+    await runWrite({
+      write: { table: 'loans', operation: 'delete', match: { id } },
+      optimistic: () => setLoans((prev) => prev.filter((l) => l.id !== id)),
+      onSynced: () => setLoans((prev) => prev.filter((l) => l.id !== id)),
+    })
   }
 
   // Record a debt payment: log it as an expense (which lowers the balance), then
@@ -428,42 +463,70 @@ export default function App() {
   async function payDebt(debt, payAmount) {
     const paid = Number(payAmount) > 0 ? Number(payAmount) : Number(debt.amount)
 
-    const { error: txError } = await supabase.from("transactions").insert([
-      { name: `Debt: ${debt.name}`, amount: paid, type: "expense", is_debt_payment: true, category: DEBT_CATEGORY },
-    ])
-    if (txError) {
-      setError(txError.message)
-      return
-    }
-
+    // Work out the debt-side change up front so we can apply it both to the live
+    // call and to the optimistic local state / queue.
+    const txRow = { name: `Debt: ${debt.name}`, amount: paid, type: "expense", is_debt_payment: true, category: DEBT_CATEGORY }
+    let debtOp // { kind: 'delete' } | { kind: 'update', fields }
     if (debt.kind === "lumpsum") {
-      await supabase.from("debts").delete().eq("id", debt.id)
+      debtOp = { kind: "delete" }
     } else if (debt.kind === "credit") {
       const newBalance = Math.max(0, (Number(debt.balance) || 0) - paid)
-      const update = { balance: newBalance }
-      // If the card tracks a due day, roll it to next month so it stops showing
-      // as "due this period" until the next statement (while a balance remains).
+      const fields = { balance: newBalance }
       if (debt.due_day && debt.next_due_date && newBalance > 0) {
-        update.next_due_date = advanceDue(debt.next_due_date, debt.due_day)
+        fields.next_due_date = advanceDue(debt.next_due_date, debt.due_day)
       }
-      await supabase.from("debts").update(update).eq("id", debt.id)
+      debtOp = { kind: "update", fields }
     } else {
       const monthsLeft = Math.max(0, (Number(debt.months_left) || 0) - 1)
-      await supabase
-        .from("debts")
-        .update({
+      debtOp = {
+        kind: "update",
+        fields: {
           months_left: monthsLeft,
-          // Advance the due date only while payments remain.
-          next_due_date:
-            monthsLeft > 0
-              ? advanceDue(debt.next_due_date, debt.due_day)
-              : debt.next_due_date,
-        })
-        .eq("id", debt.id)
+          next_due_date: monthsLeft > 0 ? advanceDue(debt.next_due_date, debt.due_day) : debt.next_due_date,
+        },
+      }
     }
 
-    fetchTransactions()
-    fetchDebts()
+    // Optimistic local update for the debt side (used when queued offline).
+    const applyDebtLocal = () => {
+      if (debtOp.kind === "delete") {
+        setDebts((prev) => prev.filter((d) => d.id !== debt.id))
+      } else {
+        setDebts((prev) => prev.map((d) => (d.id === debt.id ? { ...d, ...debtOp.fields } : d)))
+      }
+    }
+
+    // 1) The payment transaction (always an insert; offline gets a temp id).
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: txRow, tempId },
+      optimistic: () => setTransactions((prev) => [{ ...txRow, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchTransactions(),
+    })
+
+    // 2) The debt mutation. If the debt itself is an unsynced offline row, amend
+    // its queued insert / local row instead of hitting the DB with a temp id.
+    if (isTempId(debt.id)) {
+      if (debtOp.kind === "delete") {
+        removeQueuedInsert('debts', debt.id)
+        setDebts((prev) => prev.filter((d) => d.id !== debt.id))
+      } else {
+        updateQueuedInsert('debts', debt.id, debtOp.fields)
+        setDebts((prev) => prev.map((d) => (d.id === debt.id ? { ...d, ...debtOp.fields } : d)))
+      }
+    } else if (debtOp.kind === "delete") {
+      await runWrite({
+        write: { table: 'debts', operation: 'delete', match: { id: debt.id } },
+        optimistic: applyDebtLocal,
+        onSynced: () => fetchDebts(),
+      })
+    } else {
+      await runWrite({
+        write: { table: 'debts', operation: 'update', payload: debtOp.fields, match: { id: debt.id } },
+        optimistic: applyDebtLocal,
+        onSynced: () => fetchDebts(),
+      })
+    }
   }
 
   // On first load: check for an existing session, then keep it in sync.
@@ -526,18 +589,11 @@ export default function App() {
     let attempt = 0
     const BACKOFFS = [1000, 3000, 6000, 12000] // ms
 
-    // A failure we should retry (network not ready) vs. report (real rejection,
-    // e.g. a constraint violation — retrying the same payload won't help).
+    // A failure we should retry (network not ready, token not refreshed) vs.
+    // report (a real rejection — retrying the same payload won't help).
     function isTransient(message) {
       const m = (message || '').toLowerCase()
-      return (
-        m.includes('load failed') ||   // Safari network failure
-        m.includes('failed to fetch') || // Chrome/Firefox equivalent
-        m.includes('networkerror') ||
-        m.includes('network request failed') ||
-        m.includes('timeout') ||
-        m.includes('jwt') || m.includes('token') // token not refreshed yet
-      )
+      return isNetworkError({ message }) || m.includes('jwt') || m.includes('token')
     }
 
     async function tryFlush() {
@@ -554,16 +610,12 @@ export default function App() {
         let hardError = null
         for (const write of pending) {
           // Supabase reports failures in the result object, not by throwing — but
-          // a dead network DOES throw, so we handle both.
+          // a dead network DOES throw, so we handle both. replayWrite knows how to
+          // turn any queued op (insert/update/delete/upsert, matched on any
+          // columns) back into the right Supabase call.
           let result
           try {
-            if (write.operation === 'insert') {
-              result = await supabase.from(write.table).insert([write.payload])
-            } else if (write.operation === 'update') {
-              result = await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
-            } else if (write.operation === 'delete') {
-              result = await supabase.from(write.table).delete().eq('id', write.matchId)
-            }
+            result = await replayWrite(supabase, write)
           } catch (e) {
             result = { error: e }
           }
@@ -600,6 +652,7 @@ export default function App() {
         clearPendingWrites()
         setError(null)
         fetchTransactions()
+        fetchSalarySettings()
         fetchDebts()
         fetchBudgetLimits()
         fetchLoans()

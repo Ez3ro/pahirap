@@ -27,6 +27,24 @@ export function isTempId(id) {
   return typeof id === 'string' && id.startsWith(TEMP_PREFIX)
 }
 
+// Did a Supabase call fail because the NETWORK was unreachable (vs. the server
+// rejecting it)? navigator.onLine lies on mobile — iOS Safari often reports
+// online with no real connectivity — so the actual fetch failure is the source
+// of truth for "we're offline, queue this instead".
+export function isNetworkError(err) {
+  if (!err) return false
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  const m = (err.message || String(err)).toLowerCase()
+  return (
+    m.includes('load failed') ||         // Safari
+    m.includes('failed to fetch') ||     // Chrome / Firefox
+    m.includes('networkerror') ||
+    m.includes('network request failed') ||
+    m.includes('timeout') ||
+    m.includes('fetch')
+  )
+}
+
 // ── Read / write cache ────────────────────────────────────────────────────────
 
 export function saveCache(userId, key, data) {
@@ -55,7 +73,17 @@ export function clearUserCache(userId) {
 }
 
 // ── Pending write queue ───────────────────────────────────────────────────────
-// Each item: { table, operation: 'insert'|'update'|'delete', payload?, matchId? }
+// Each item is a self-describing operation:
+//   { table, operation, payload?, match?, onConflict?, tempId? }
+//     operation : 'insert' | 'update' | 'delete' | 'upsert'
+//     payload   : the row(s) for insert/update/upsert
+//     match     : { column: value, … } — the WHERE for update/delete
+//     onConflict: comma-separated columns, for upsert
+//     tempId    : set on offline inserts so a later offline edit/delete can find
+//                 and amend the queued insert instead of hitting the DB
+//
+// replayWrite() below is the single place that turns one of these back into a
+// Supabase call, used by the flush loop.
 
 export function queueWrite(item) {
   try {
@@ -65,6 +93,30 @@ export function queueWrite(item) {
   } catch {
     // ignore
   }
+}
+
+// Execute one queued operation against a live Supabase client. Returns the
+// Supabase result ({ error } shape). Centralised so the flush loop doesn't have
+// to know the op vocabulary.
+export async function replayWrite(supabase, write) {
+  const q = supabase.from(write.table)
+  if (write.operation === 'insert') {
+    return q.insert(Array.isArray(write.payload) ? write.payload : [write.payload])
+  }
+  if (write.operation === 'upsert') {
+    return q.upsert(write.payload, write.onConflict ? { onConflict: write.onConflict } : undefined)
+  }
+  if (write.operation === 'update') {
+    let builder = q.update(write.payload)
+    for (const [col, val] of Object.entries(write.match || {})) builder = builder.eq(col, val)
+    return builder
+  }
+  if (write.operation === 'delete') {
+    let builder = q.delete()
+    for (const [col, val] of Object.entries(write.match || {})) builder = builder.eq(col, val)
+    return builder
+  }
+  return { error: { message: `Unknown queued operation: ${write.operation}` } }
 }
 
 export function getPendingWrites() {
