@@ -23,17 +23,17 @@ import {
 import { formatMoney, formatMonthYear } from "@/lib/format"
 import { summariseDebts, startOfDay, killOrder, payoffDate, formatMonthsLeft, isDueInWindow, summariseDebtsByType, debtType } from "@/lib/debts"
 import { categoryIcon, categoryColor, isDebtPayment } from "@/lib/categories"
-import { currentPeriod, isDateInPeriod } from "@/lib/period"
+import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod } from "@/lib/period"
 import { ringStats } from "@/lib/ring"
 import BudgetRing from "@/components/BudgetRing"
 
 // The stable list of all possible block IDs, in their default order.
 // Stats (Balance / Income / Expenses / Lent out) lead the dashboard.
-const DEFAULT_ORDER = ["stats", "budget-bar", "spending-debts", "kill-order"]
+const DEFAULT_ORDER = ["stats", "budget", "debt", "kill-order"]
 
 // Bump this when the default order changes in a way that should override a user's
 // previously-saved arrangement (the old localStorage key is then ignored once).
-const ORDER_KEY = "dashboard-order-v2"
+const ORDER_KEY = "dashboard-order-v3"
 
 function loadOrder() {
   try {
@@ -72,6 +72,12 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   // Per-type monthly breakdown (Cards ₱X, Car ₱Y, …) for the Debt overview card.
   const debtByType = summariseDebtsByType(debts)
   const periodLabel = `${period.label} payday`
+  // The next payday is the day after the period ends. Everything in the ring is
+  // paced toward this date, so "this week" reads as a week in the run-up to payday
+  // rather than a calendar/month week.
+  const nextPayday = new Date(period.end.getFullYear(), period.end.getMonth(), period.end.getDate() + 1)
+  const daysToPayday = daysRemaining(period, today)
+  const paydayAnchor = `until payday · ${nextPayday.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} (${daysToPayday}d)`
 
   // Recurring debt still due in this pay-day period (and not yet paid).
   let dueThisPeriod = 0
@@ -89,8 +95,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
     if (isDateInPeriod(td, period))
       spentByCat[t.category] = (spentByCat[t.category] || 0) + Number(t.amount)
   }
-  const spendingEntries = Object.entries(spentByCat).sort((a, b) => b[1] - a[1])
-  const spendingTotal   = spendingEntries.reduce((s, [, v]) => s + v, 0)
+  const spendingTotal = Object.values(spentByCat).reduce((s, v) => s + v, 0)
 
   // Overall budget bar.
   const totalBudget   = budgetLimits.reduce((s, b) => s + Number(b.monthly_limit), 0)
@@ -107,6 +112,10 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   // Lent money still out (not written off, not fully repaid) — shown in the stats.
   const lentActive = loans.filter((l) => !l.written_off && Number(l.amount_paid) < Number(l.amount))
   const lentActiveOutstanding = lentActive.reduce((s, l) => s + outstandingOf(l), 0)
+  // Average discretionary spend per day so far this period — a simple "how fast am
+  // I burning it?" stat. Debt payments are excluded, matching the budget views.
+  const daysElapsed    = Math.max(1, daysInPeriod(period) - daysToPayday + 1)
+  const avgSpendPerDay = spendingTotal / daysElapsed
 
   const [todayExpanded, setTodayExpanded] = useState(false)
   const [ringTf, setRingTf] = useState("daily")
@@ -139,9 +148,10 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
 
   // Only render blocks that currently have content.
   const visibleBlocks = blockOrder.filter((id) => {
-    if (id === "kill-order")     return debts.length > 0
-    if (id === "budget-bar")     return totalBudget > 0
-    // spending-debts always shows (debt overview is always useful)
+    if (id === "kill-order") return debts.length > 0
+    if (id === "debt")       return debts.length > 0
+    if (id === "budget")     return totalBudget > 0 || spendingTotal > 0
+    // stats always shows
     return true
   })
 
@@ -149,7 +159,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
     switch (id) {
       case "stats":
         return (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <StatCard
               label="Balance"
               value={balance}
@@ -157,6 +167,11 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
             />
             <StatCard label="Income"   value={income}    tone="text-green-500" />
             <StatCard label="Expenses" value={expenses}  tone="text-red-500" />
+            <StatCard
+              label="Avg spend/day"
+              value={avgSpendPerDay}
+              note={`over ${daysElapsed} day${daysElapsed === 1 ? "" : "s"} this period`}
+            />
             <StatCard
               label="Lent out"
               value={lentActiveOutstanding}
@@ -166,115 +181,72 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
           </div>
         )
 
-      case "spending-debts":
+      case "debt":
         return (
-          <div className="grid gap-4 lg:grid-cols-3">
-            {/* Spending breakdown — wide left column */}
-            <Card className="lg:col-span-2">
-              <CardHeader>
-                <CardTitle>Spending this period</CardTitle>
-                <CardDescription>
-                  {period.label} · {today.toLocaleString("en-PH", { month: "long", year: "numeric" })}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {spendingEntries.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No expenses recorded this period yet.</p>
-                ) : (
-                  <>
-                    <div className="space-y-3">
-                      {spendingEntries.map(([cat, amount]) => {
-                        const pct = Math.round((amount / spendingTotal) * 100)
-                        return (
-                          <div key={cat}>
-                            <div className="mb-1 flex justify-between text-sm">
-                              <span className="text-muted-foreground">{cat}</span>
-                              <span className="font-medium">
-                                {formatMoney(amount)}{" "}
-                                <span className="text-muted-foreground">· {pct}%</span>
-                              </span>
-                            </div>
-                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                              <div className="h-1.5 rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    <p className="mt-4 border-t border-border pt-3 text-sm font-semibold">
-                      Total <span className="float-right">{formatMoney(spendingTotal)}</span>
-                    </p>
-                  </>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader><CardTitle>Debt overview</CardTitle></CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <OverviewRow label="Total still owed"  value={formatMoney(debtSummary.totalOwed)} />
+                <OverviewRow label="Monthly due"       value={formatMoney(debtSummary.recurringTotal)} />
+                <OverviewRow label="Due this period"   value={formatMoney(debtSummary.dueNow)} />
+                <OverviewRow label="Overdue debts"     value={String(debtSummary.lateCount)} danger={debtSummary.lateCount > 0} />
+
+                {/* Per-type monthly breakdown */}
+                {debtByType.length > 0 && (
+                  <div className="space-y-1.5 border-t border-border pt-2">
+                    <p className="text-xs text-muted-foreground">By type · monthly</p>
+                    {debtByType.map((t) => (
+                      <div key={t.type} className="flex items-center justify-between text-xs">
+                        <span className="flex items-center gap-1.5 text-muted-foreground">
+                          <span aria-hidden>{debtType(t.type).icon}</span>
+                          {debtType(t.type).label}
+                        </span>
+                        <span className="font-medium text-gray-300">
+                          {t.monthly > 0 ? `${formatMoney(t.monthly)}/mo` : formatMoney(t.owed)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </CardContent>
             </Card>
-
-            {/* Debt overview + due this period — right column */}
-            <div className="flex flex-col gap-4">
-              <Card>
-                <CardHeader><CardTitle>Debt overview</CardTitle></CardHeader>
-                <CardContent className="space-y-3 text-sm">
-                  <OverviewRow label="Total still owed"  value={formatMoney(debtSummary.totalOwed)} />
-                  <OverviewRow label="Monthly due"       value={formatMoney(debtSummary.recurringTotal)} />
-                  <OverviewRow label="Due this period"   value={formatMoney(debtSummary.dueNow)} />
-                  <OverviewRow label="Overdue debts"     value={String(debtSummary.lateCount)} danger={debtSummary.lateCount > 0} />
-
-                  {/* Per-type monthly breakdown */}
-                  {debtByType.length > 0 && (
-                    <div className="space-y-1.5 border-t border-border pt-2">
-                      <p className="text-xs text-muted-foreground">By type · monthly</p>
-                      {debtByType.map((t) => (
-                        <div key={t.type} className="flex items-center justify-between text-xs">
-                          <span className="flex items-center gap-1.5 text-muted-foreground">
-                            <span aria-hidden>{debtType(t.type).icon}</span>
-                            {debtType(t.type).label}
-                          </span>
-                          <span className="font-medium text-gray-300">
-                            {t.monthly > 0 ? `${formatMoney(t.monthly)}/mo` : formatMoney(t.owed)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+            {dueThisPeriod > 0 ? (
+              <Card
+                className="border-red-700/40 bg-red-950/20"
+                style={{ boxShadow: "0 0 18px rgba(255,14,14,0.46)" }}
+              >
+                <CardHeader>
+                  <CardTitle className="text-red-500">Due this period</CardTitle>
+                  <CardDescription className="text-red-500/70">{periodLabel}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-2xl font-semibold text-red-200">{formatMoney(dueThisPeriod)}</p>
+                  <p className="mt-1 text-xs text-red-500">
+                    Recurring debts due before the next payday
+                  </p>
                 </CardContent>
               </Card>
-              {dueThisPeriod > 0 ? (
-                <Card
-                  className="border-red-700/40 bg-red-950/20"
-                  style={{ boxShadow: "0 0 18px rgba(255,14,14,0.46)" }}
-                >
-                  <CardHeader>
-                    <CardTitle className="text-red-500">Due this period</CardTitle>
-                    <CardDescription className="text-red-500/70">{periodLabel}</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-2xl font-semibold text-red-200">{formatMoney(dueThisPeriod)}</p>
-                    <p className="mt-1 text-xs text-red-500">
-                      Recurring debts due before the next payday
-                    </p>
-                  </CardContent>
-                </Card>
-              ) : (
-                <Card className="border-green-800/40 bg-green-950/20">
-                  <CardHeader>
-                    <CardTitle className="text-green-400">All paid this period</CardTitle>
-                    <CardDescription className="text-green-500/70">{periodLabel}</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-green-300">
-                      Nothing more due before the next payday. 🎉
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
-            </div>
+            ) : (
+              <Card className="border-green-800/40 bg-green-950/20">
+                <CardHeader>
+                  <CardTitle className="text-green-400">All paid this period</CardTitle>
+                  <CardDescription className="text-green-500/70">{periodLabel}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm text-green-300">
+                    Nothing more due before the next payday. 🎉
+                  </p>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )
 
-      case "budget-bar":
+      case "budget":
         return (
           <div className="grid gap-4 lg:grid-cols-3">
-            {/* Period budget — larger (2/3) */}
+            {/* Period budget + per-category spending — larger (2/3) */}
             <Card className="lg:col-span-2">
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
@@ -300,36 +272,44 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                     : `${formatMoney(Math.max(0, totalBudget - spendingTotal))} left · ${budgetPct}%`}
                 </p>
 
-                {/* Per-category breakdown — always shown; scrolls internally past
-                    ~5 rows so the card never grows unbounded. */}
+                {/* Per-category breakdown — spend, share of total, and budget left.
+                    Scrolls internally past ~6 rows so the card never grows unbounded. */}
                 {catRows.length > 0 && (
                   <div className="mt-3 border-t border-border pt-2">
                     <p className="py-1 text-xs text-muted-foreground">Categories</p>
-                    <div className="mt-2 max-h-44 space-y-2 overflow-y-auto pr-1">
+                    <div className="mt-2 max-h-52 space-y-2 overflow-y-auto pr-1">
                         {catRows.map(({ category, limit, spent }) => {
                           const remaining = limit > 0 ? limit - spent : null
                           const isOver    = remaining !== null && remaining < 0
                           const remPct    = limit > 0 ? Math.max(0, Math.round(((limit - spent) / limit) * 100)) : null
+                          const share     = spendingTotal > 0 ? Math.round((spent / spendingTotal) * 100) : 0
                           return (
                             <div key={category} className="flex items-center gap-2 text-xs">
                               <span className="shrink-0" aria-hidden>{categoryIcon(category)}</span>
                               <span className="min-w-0 flex-1 truncate text-muted-foreground">{category}</span>
-                              <span className="shrink-0 whitespace-nowrap text-gray-500">{formatMoney(spent)}</span>
+                              <span className="shrink-0 whitespace-nowrap text-gray-500">
+                                {formatMoney(spent)} <span className="text-gray-600">· {share}%</span>
+                              </span>
                               <span className={`shrink-0 whitespace-nowrap font-medium ${isOver ? "text-red-400" : remaining === 0 ? "text-amber-400" : "text-gray-300"}`}>
                                 {remaining === null ? "—" : isOver ? `−${formatMoney(Math.abs(remaining))}` : `${formatMoney(remaining)} left`}
                               </span>
-                              {remPct !== null && (
+                              {remPct !== null ? (
                                 <div className="w-8 shrink-0 overflow-hidden rounded-full bg-muted" style={{ height: "3px" }}>
                                   <div
                                     className={`h-full rounded-full ${isOver ? "bg-red-500" : remPct <= 30 ? "bg-amber-400" : "bg-green-500"}`}
                                     style={{ width: `${remPct}%` }}
                                   />
                                 </div>
+                              ) : (
+                                <div className="w-8 shrink-0" />
                               )}
                             </div>
                           )
                         })}
                     </div>
+                    <p className="mt-2 border-t border-border pt-2 text-xs font-semibold">
+                      Total <span className="float-right">{formatMoney(spendingTotal)}</span>
+                    </p>
                   </div>
                 )}
               </CardContent>
@@ -339,6 +319,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
             <Card className="lg:col-span-1">
               <CardHeader className="pb-2">
                 <CardTitle className="text-base">{ringTitle}</CardTitle>
+                <CardDescription className="text-xs">{paydayAnchor}</CardDescription>
               </CardHeader>
               <CardContent>
                 {/* Timeframe toggle */}
@@ -360,22 +341,23 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                   <>
                     <div className="flex flex-col items-center text-center">
                       <BudgetRing
-                        segments={ring.rows.map((r) => ({ color: categoryColor(r.category), value: r.spent }))}
+                        segments={ring.rows.map((r) => ({ color: categoryColor(r.category), value: r.spent, label: r.category }))}
                         allowance={ring.allowance}
                         pct={ring.usedPct}
                         over={ring.over}
                         size={140}
                       />
-                      <p className={`mt-3 text-xl font-bold ${ring.over ? "text-red-400" : "text-foreground"}`}>
-                        {formatMoney(ring.spent)}
+                      {/* Hero: budget left for this window (distinct from the headline's
+                          cash "safe to spend"). Goes to "over" when negative; the numbers
+                          reconcile — spent + this = the window budget below. */}
+                      <p className={`mt-3 text-3xl font-bold ${ring.over ? "text-red-400" : "text-green-400"}`}>
+                        {ring.over ? `${formatMoney(Math.abs(ring.remaining))} over` : formatMoney(ring.remaining)}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        of {formatMoney(ring.allowance)} {ring.label}
+                        {ring.over ? `over ${ring.label}'s budget` : `left in ${ring.label}'s budget`}
                       </p>
-                      <p className={`mt-1 text-xs font-semibold ${ring.over ? "text-red-400" : "text-green-400"}`}>
-                        {ring.over
-                          ? `${formatMoney(Math.abs(ring.remaining))} over`
-                          : `${formatMoney(ring.remaining)} left`}
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        {formatMoney(ring.spent)} spent of {formatMoney(ring.allowance)} {ring.label}
                       </p>
                       {ringTf !== "monthly" && (
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -385,7 +367,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                     </div>
 
                     {/* Per-category allotment — collapsible */}
-                    {ring.rows.length > 0 && (
+                    {(ring.rows.length > 0 || ring.extraRows.length > 0) && (
                       <div className="mt-3 border-t border-border pt-2">
                         <button
                           onClick={() => setTodayExpanded((v) => !v)}
@@ -399,6 +381,17 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                             {ring.rows.map((r) => (
                               <AllotmentRow key={r.category} row={r} showCadence={ringTf === "monthly"} />
                             ))}
+                            {/* Finer-cadence categories — shown for reference, not in the ring's % above */}
+                            {ring.extraRows.length > 0 && (
+                              <div className="mt-1 space-y-2 border-t border-border/60 pt-2">
+                                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                  Daily Budget on weekly
+                                </p>
+                                {ring.extraRows.map((r) => (
+                                  <AllotmentRow key={r.category} row={r} showCadence />
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -530,9 +523,10 @@ function DebtKillOrder({ debts, today }) {
   )
 }
 
-// One category's daily (or windowed) allotment row: icon, spent vs allotment, bar.
+// One category line in a ring: icon, name, what's left to spend this window (or
+// over, in red), and a small usage bar. Amounts are at the ring's cadence.
 function AllotmentRow({ row, showCadence = false }) {
-  const { category, cadence, spent, allotment, pct, over } = row
+  const { category, cadence, spent, left, pct, over, limit } = row
   return (
     <div className="flex items-center gap-2 text-xs">
       <span className="shrink-0" aria-hidden>{categoryIcon(category)}</span>
@@ -540,10 +534,13 @@ function AllotmentRow({ row, showCadence = false }) {
       {showCadence && (
         <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] capitalize text-gray-400">{cadence}</span>
       )}
-      <span className="shrink-0 whitespace-nowrap text-gray-500">
-        {formatMoney(spent)}
-        {allotment > 0 && <span className="text-gray-600"> / {formatMoney(allotment)}</span>}
-      </span>
+      {limit > 0 ? (
+        <span className={`shrink-0 whitespace-nowrap font-medium ${over ? "text-red-400" : "text-gray-200"}`}>
+          {over ? `${formatMoney(-left)} over` : `${formatMoney(left)} left`}
+        </span>
+      ) : (
+        <span className="shrink-0 whitespace-nowrap text-gray-500">{formatMoney(spent)} spent</span>
+      )}
       <div className="w-8 shrink-0 overflow-hidden rounded-full bg-muted" style={{ height: "3px" }}>
         <div
           className={`h-full rounded-full ${over || pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-green-500"}`}
