@@ -1,7 +1,9 @@
 import { NAV_ITEMS } from "../lib/nav"
 import NotificationToggle from "./NotificationToggle"
+import { useInstallPrompt } from "../lib/useInstallPrompt"
 
 export default function Sidebar({ view, onChange, email, onSignOut, open, onClose, collapsed, onToggleCollapsed }) {
+  const { canInstall, isIOS, install } = useInstallPrompt()
   function handleNav(key) {
     onChange(key)
     onClose()
@@ -55,20 +57,33 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
           </svg>
         </button>
 
-        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
+        <h1 className="mb-4 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
+
+        {canInstall && (
+          <button
+            onClick={install}
+            className="mb-4 w-full rounded-lg border border-blue-700/50 bg-blue-950/40 px-3 py-2 text-sm text-blue-300 hover:bg-blue-900/40"
+          >
+            Install app
+          </button>
+        )}
+        {isIOS && (
+          <p className="mb-4 px-1 text-xs leading-relaxed text-gray-500">
+            To install: tap <span className="font-medium text-gray-400">Share</span> → &quot;Add to Home Screen&quot;
+          </p>
+        )}
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (
             <button
               key={item.key}
               onClick={() => handleNav(item.key)}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
+              className={`rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
                 view === item.key
                   ? "bg-blue-600 text-white"
                   : "text-gray-300 hover:bg-gray-800"
               }`}
             >
-              <span aria-hidden>{item.icon}</span>
               {item.label}
             </button>
           ))}
@@ -76,6 +91,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
 
         <div className="mt-4 border-t border-gray-800 pt-4">
           <NotificationToggle />
+
           <p className="mt-2 truncate px-3 text-xs text-gray-500" title={email}>
             {email}
           </p>

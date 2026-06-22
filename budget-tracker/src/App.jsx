@@ -5,6 +5,8 @@ import { supabase } from "./lib/supabase"
 import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
 import { NAV_ITEMS } from "./lib/nav"
+import { useOnlineStatus } from "./lib/useOnlineStatus"
+import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites } from "./lib/offlineCache"
 import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
 import Income from "./views/Income"
@@ -20,6 +22,8 @@ import AddTransactionSheet from "./components/AddTransactionSheet"
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
   // `authReady` stops us flashing the login screen before we've checked.
+  const isOnline = useOnlineStatus()
+
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
 
@@ -52,8 +56,12 @@ export default function App() {
 
   async function fetchTransactions() {
     setLoading(true)
-    // No need to filter by user here — Row Level Security only returns the
-    // logged-in user's own rows, so "select *" is already scoped to them.
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'transactions')
+      if (cached) setTransactions(cached)
+      setLoading(false)
+      return
+    }
     const { data, error } = await supabase
       .from("transactions")
       .select("*")
@@ -61,8 +69,11 @@ export default function App() {
 
     if (error) {
       setError(error.message)
+      const cached = loadCache(session.user.id, 'transactions')
+      if (cached) setTransactions(cached)
     } else {
       setTransactions(data)
+      saveCache(session.user.id, 'transactions', data)
       setError(null)
     }
     setLoading(false)
@@ -70,17 +81,19 @@ export default function App() {
 
   // Returns true on success so callers (e.g. the add sheet) know whether to close.
   async function addTransaction(transaction) {
-    // We don't pass user_id — the table's default (auth.uid()) fills it in.
+    if (!navigator.onLine) {
+      // Queue for sync on reconnect and show optimistically in the UI.
+      queueWrite({ table: 'transactions', operation: 'insert', payload: transaction })
+      const temp = { ...transaction, id: `temp_${Date.now()}`, created_at: new Date().toISOString() }
+      setTransactions((prev) => [temp, ...prev])
+      return true
+    }
     const { error } = await supabase.from("transactions").insert([transaction])
     if (error) {
       setError(error.message)
       return false
     }
     fetchTransactions()
-    // Nudge the push function to check budgets now, so an overspend pings you
-    // immediately rather than waiting for the next hourly cron run. Fire-and-
-    // forget: the server makes the real (de-duped) decision, and any failure
-    // here is swallowed so it never affects saving the transaction.
     triggerInstantCheck()
     return true
   }
@@ -101,13 +114,23 @@ export default function App() {
   }
 
   async function fetchSalarySettings() {
-    // maybeSingle() returns one row or null (rather than erroring when none exists).
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'salary_settings')
+      if (cached !== null) setSalarySettings(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("salary_settings")
       .select("*")
       .maybeSingle()
 
-    if (!error) setSalarySettings(data)
+    if (!error) {
+      setSalarySettings(data)
+      saveCache(session.user.id, 'salary_settings', data)
+    } else {
+      const cached = loadCache(session.user.id, 'salary_settings')
+      if (cached !== null) setSalarySettings(cached)
+    }
   }
 
   async function saveSalarySettings({ periodA, periodB, paydayA, paydayB }) {
@@ -192,13 +215,24 @@ export default function App() {
   }
 
   async function fetchDebts() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'debts')
+      if (cached) setDebts(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("debts")
       .select("*")
       .order("created_at", { ascending: false })
 
-    if (error) setError(error.message)
-    else setDebts(data)
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'debts')
+      if (cached) setDebts(cached)
+    } else {
+      setDebts(data)
+      saveCache(session.user.id, 'debts', data)
+    }
   }
 
   async function addDebt(debt) {
@@ -220,8 +254,18 @@ export default function App() {
   }
 
   async function fetchBudgetLimits() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'budget_limits')
+      if (cached) setBudgetLimits(cached)
+      return
+    }
     const { data, error } = await supabase.from("budget_limits").select("*")
-    if (error) { setError(error.message); return }
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'budget_limits')
+      if (cached) setBudgetLimits(cached)
+      return
+    }
 
     if (data.length === 0) {
       // First visit — seed the default categories with no limit set yet.
@@ -234,10 +278,12 @@ export default function App() {
       if (seedError) { setError(seedError.message); return }
       const { data: seeded } = await supabase.from("budget_limits").select("*")
       setBudgetLimits(seeded ?? [])
+      saveCache(session.user.id, 'budget_limits', seeded ?? [])
       return
     }
 
     setBudgetLimits(data)
+    saveCache(session.user.id, 'budget_limits', data)
   }
 
   async function saveBudgetLimit(category, limit) {
@@ -315,12 +361,23 @@ export default function App() {
   }
 
   async function fetchLoans() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'loans')
+      if (cached) setLoans(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("loans")
       .select("*")
       .order("created_at", { ascending: false })
-    if (error) setError(error.message)
-    else setLoans(data)
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'loans')
+      if (cached) setLoans(cached)
+    } else {
+      setLoans(data)
+      saveCache(session.user.id, 'loans', data)
+    }
   }
 
   async function addLoan(loan) {
@@ -423,7 +480,40 @@ export default function App() {
     }
   }, [session])
 
+  // Flush queued offline writes the moment connectivity returns.
+  useEffect(() => {
+    if (!isOnline || !session) return
+    const pending = getPendingWrites()
+    if (!pending.length) return
+
+    async function flush() {
+      for (const write of pending) {
+        try {
+          if (write.operation === 'insert') {
+            await supabase.from(write.table).insert([write.payload])
+          } else if (write.operation === 'update') {
+            await supabase.from(write.table).update(write.payload).eq('id', write.matchId)
+          } else if (write.operation === 'delete') {
+            await supabase.from(write.table).delete().eq('id', write.matchId)
+          }
+        } catch {
+          // A single failed write shouldn't block the rest.
+        }
+      }
+      clearPendingWrites()
+      // Refetch everything so optimistic temp items are replaced with real data.
+      fetchTransactions()
+      fetchDebts()
+      fetchBudgetLimits()
+      fetchLoans()
+    }
+
+    flush()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline, session])
+
   async function signOut() {
+    if (session) clearUserCache(session.user.id)
     await supabase.auth.signOut()
   }
 
@@ -527,7 +617,17 @@ export default function App() {
         onToggleCollapsed={toggleSidebarCollapsed}
       />
 
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className="flex-1 overflow-y-auto">
+        {!isOnline && (
+          <div className="flex items-center gap-2 border-b border-amber-700/40 bg-amber-950/60 px-6 py-2 text-sm text-amber-300">
+            <span>●</span>
+            <span>
+              You&apos;re offline — showing cached data.
+              {getPendingWrites().length > 0 && ` ${getPendingWrites().length} change${getPendingWrites().length === 1 ? '' : 's'} will sync when you reconnect.`}
+            </span>
+          </div>
+        )}
+        <div className="p-6">
         <div className="mx-auto">
           <div className="mb-6 flex items-center gap-3">
             {/* Mobile: open the slide-over. */}
@@ -558,6 +658,7 @@ export default function App() {
           )}
 
           {renderView()}
+        </div>
         </div>
       </main>
 
