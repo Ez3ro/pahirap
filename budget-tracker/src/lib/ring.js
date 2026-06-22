@@ -32,8 +32,12 @@ export function windowFor(cadence, period, today = new Date()) {
     return { start: period.start, end, label: "this period" }
   }
   if (cadence === "weekly") {
-    const start = new Date(startToday)
-    start.setDate(start.getDate() - 6) // last 7 days inclusive
+    const rollingStart = new Date(startToday)
+    rollingStart.setDate(rollingStart.getDate() - 6) // last 7 days inclusive
+    // Don't reach back past the start of the pay period: spend before payday was
+    // funded by the previous paycheck and belongs to that period's budget, so
+    // counting it under "this week" would double it against this period's pool.
+    const start = rollingStart < period.start ? new Date(period.start) : rollingStart
     return { start, end, label: "this week" }
   }
   return { start: startToday, end, label: "today" } // daily

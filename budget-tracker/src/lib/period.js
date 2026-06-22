@@ -23,13 +23,15 @@ function dateOnDay(year, monthIndex, day) {
   return new Date(year, monthIndex, Math.min(day, lastDay))
 }
 
-// Pull the two paydays out of salary settings, falling back to 5th & 20th.
-// De-duplicated and sorted ascending so the period maths is predictable.
+// Pull the paydays out of salary settings, falling back to 5th & 20th only when
+// none are set. One valid payday is fine — it just means a single monthly period;
+// two give the usual twice-monthly split. De-duplicated and sorted ascending so
+// the period maths is predictable.
 export function paydaysFromSettings(settings) {
   const raw = [settings?.payday_b, settings?.payday_a]
     .map((d) => Number(d))
     .filter((d) => Number.isFinite(d) && d >= 1 && d <= 31)
-  const days = raw.length === 2 ? raw : DEFAULT_PAYDAYS
+  const days = raw.length > 0 ? raw : DEFAULT_PAYDAYS
   return [...new Set(days)].sort((a, b) => a - b)
 }
 

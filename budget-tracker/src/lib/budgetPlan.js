@@ -170,8 +170,34 @@ export function buildBudgetPlan({ transactions, debts, budgetLimits, loans = [],
   const unset = included.filter((b) => Number(b.monthly_limit) <= 0)
   const manualTotal = manual.reduce((s, b) => s + Number(b.monthly_limit), 0)
 
+  // Per-category discretionary spend this period, so we can tell spend that's
+  // already covered by a manual reservation apart from spend that isn't.
+  const spentByCat = {}
+  for (const t of transactions) {
+    if (t.type !== "expense" || isDebtPayment(t)) continue
+    if (!isDateInPeriod(new Date(t.created_at), period)) continue
+    const cat = t.category || "Other"
+    spentByCat[cat] = (spentByCat[cat] || 0) + (Number(t.amount) || 0)
+  }
+
+  // Reserve each manual category at its limit — or at what's already been spent in
+  // it, if that's more (overspend has to come from somewhere). Spend that stays
+  // within the limit is already inside the reservation, so it isn't charged twice.
+  const manualCats = new Set(manual.map((b) => b.category))
+  const manualReserved = manual.reduce(
+    (s, b) => s + Math.max(Number(b.monthly_limit), spentByCat[b.category] || 0),
+    0
+  )
+
+  // Spend in categories with no manual reservation (the unset ones, plus anything
+  // filed under a removed/unbudgeted category). Nothing else accounts for that
+  // money, so it comes off the free pot.
+  const spentUnreserved = Object.entries(spentByCat)
+    .filter(([cat]) => !manualCats.has(cat))
+    .reduce((s, [, amt]) => s + amt, 0)
+
   // The pot the auto-allocator gets to share across the unset categories.
-  const leftover = Math.max(0, afterCommitted - manualTotal - alreadySpent)
+  const leftover = Math.max(0, afterCommitted - manualReserved - spentUnreserved)
 
   // Needs-first, capped allocation (see allocateByTier) instead of an even split.
   const unsetWithRules = unset.map((b) => ({ category: b.category, rule: budgetRuleFor(b.category) }))
