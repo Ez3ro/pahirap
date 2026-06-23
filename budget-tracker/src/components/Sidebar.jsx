@@ -1,5 +1,6 @@
 import { NAV_ITEMS } from "../lib/nav"
 import NotificationToggle from "./NotificationToggle"
+import InstallButton from "./InstallButton"
 
 export default function Sidebar({ view, onChange, email, onSignOut, open, onClose, collapsed, onToggleCollapsed }) {
   function handleNav(key) {
@@ -55,7 +56,11 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
           </svg>
         </button>
 
-        <h1 className="mb-6 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
+        <h1 className="mb-4 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
+
+        {/* Install the PWA — sits at the top, just under the title. Renders
+            nothing when the app is already installed or not installable. */}
+        <InstallButton variant="dark" className="mb-4" />
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (

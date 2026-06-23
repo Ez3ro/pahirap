@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { supabase } from "../lib/supabase"
+import InstallButton from "./InstallButton"
 
 // One screen that handles both signing in and signing up.
 // We flip between the two with the `mode` state instead of a second component.
@@ -150,6 +151,11 @@ export default function Auth() {
             : "Already have an account? Sign in"}
           </button>
           </div>
+
+          {/* Install the PWA — a quiet secondary action below the card, so it
+              doesn't compete with sign in. Renders nothing when the app is
+              already installed or not installable. */}
+          <InstallButton alwaysShow className="mt-4" />
         </div>
       </div>
     </div>
