@@ -1,6 +1,17 @@
 import { useState } from "react"
 import { supabase } from "../lib/supabase"
+import { useInstallPrompt } from "../lib/useInstallPrompt"
 import InstallButton from "./InstallButton"
+
+// Some apps (Messenger, Instagram, Facebook, TikTok, WeChat, etc.) open links in
+// an embedded "in-app browser". Google refuses its OAuth sign-in there with a
+// "disallowed_useragent" 403, so we detect it and steer people to a real browser
+// or the email form instead.
+function isInAppBrowser() {
+  if (typeof navigator === "undefined") return false
+  const ua = navigator.userAgent || ""
+  return /FBAN|FBAV|FB_IAB|Instagram|Line\/|Twitter|TikTok|musical_ly|Snapchat|LinkedInApp|Pinterest|Messenger|MicroMessenger/i.test(ua)
+}
 
 // One screen that handles both signing in and signing up.
 // We flip between the two with the `mode` state instead of a second component.
@@ -46,6 +57,12 @@ export default function Auth() {
     if (error) setError(error.message)
   }
 
+  // In an embedded in-app browser, Google OAuth is blocked — warn and offer alternatives.
+  const inApp = isInAppBrowser()
+  // Only show the install pitch when the app is actually installable here
+  // (a pending Android prompt or an iOS Safari session).
+  const { canInstall, isIOS } = useInstallPrompt()
+
   return (
     // Mobile: a single non-scrolling screen (h-screen + overflow-hidden), tightened
     // so the hook, the 4 features and the form all fit one phone viewport.
@@ -63,7 +80,7 @@ export default function Auth() {
               This one budgets <span className="font-semibold text-blue-600 dark:text-blue-400">payday to payday</span> — so you
               know exactly how much you can spend before your next sweldo.
             </p>
-            <ul className="mt-4 grid grid-cols-1 gap-1.5 text-sm text-gray-700 dark:text-gray-300 sm:grid-cols-2">
+            <ul className="mt-4 grid grid-cols-1 gap-1.5 text-sm text-gray-600 dark:text-gray-400 sm:grid-cols-2">
               {[
                 "Payday-to-payday budgeting",
                 "Debt snowball & avalanche",
@@ -71,12 +88,23 @@ export default function Auth() {
                 "Install it on your phone",
               ].map((feature) => (
                 <li key={feature} className="flex items-center gap-2">
-                  <span className="text-green-500" aria-hidden>✓</span>
+                  <span className="h-1 w-1 rounded-full bg-gray-500" aria-hidden />
                   {feature}
                 </li>
               ))}
             </ul>
           </div>
+
+          {/* Install prompt — sits between the pitch and the login card so new
+              users see it before they've signed up. Android fires the native
+              prompt; iOS opens a short visual Add-to-Home-Screen guide. */}
+          {(canInstall || isIOS) && (
+            <div className="mt-4 rounded-xl border border-blue-700/40 bg-blue-950/40 p-4">
+              <p className="text-sm font-medium text-blue-300">Works as a phone app</p>
+              <p className="mt-0.5 text-xs text-blue-400/80">No App Store needed — installs straight from your browser.</p>
+              <InstallButton className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500" />
+            </div>
+          )}
 
           {/* Login / signup card */}
           <div className="mt-5 w-full rounded-xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800 sm:p-6">
@@ -86,6 +114,14 @@ export default function Auth() {
           <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
             {mode === "signin" ? "Sign in to your account" : "Takes a few seconds — no card needed"}
           </p>
+
+          {inApp && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-relaxed text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
+              You're in an in-app browser, so <span className="font-semibold">Continue with Google</span> will be blocked.
+              Tap the <span className="font-semibold">•••</span> (or share) menu and choose{" "}
+              <span className="font-semibold">Open in Safari / Chrome</span> — or just sign in with email below.
+            </div>
+          )}
 
           {/* Google OAuth — the fast path. */}
           <button

@@ -1,3 +1,6 @@
+import { useState } from "react"
+import { formatMoney } from "../lib/format"
+
 // An Apple-Fitness-style budget ring.
 //
 // Two modes:
@@ -10,8 +13,16 @@
 // Shared by the Budget page and the Dashboard daily-budget block.
 export default function BudgetRing({ pct = 0, over = false, segments = null, allowance = 0, size = 132 }) {
   const stroke = size >= 120 ? 12 : 10
-  const radius = (size - stroke) / 2
+  // The overflow "second lap" ring sits just outside the main ring, so reserve
+  // room for it (gap + its stroke) plus a small margin. Without this the outer
+  // ring renders past the SVG bounds and gets clipped by the box.
+  const overflowStroke = 3
+  const gap = 2
+  const radius = size / 2 - stroke / 2 - gap - overflowStroke - 2
   const C = 2 * Math.PI * radius
+
+  // Which segment the pointer is over (or was tapped), so the centre can name it.
+  const [hovered, setHovered] = useState(null)
 
   // ── Segmented mode ──────────────────────────────────────────────────────────
   if (segments && segments.length > 0 && allowance > 0) {
@@ -28,6 +39,8 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
     // Cumulative start fraction for each segment = sum of all previous fractions.
     const placed = visible.map((s, i) => ({
       color: s.color,
+      label: s.label,
+      value: s.value,
       frac: s.value / denom,
       start: visible.slice(0, i).reduce((sum, p) => sum + p.value / denom, 0),
     }))
@@ -45,7 +58,10 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
           strokeDasharray={`${dash} ${C - dash}`}
           strokeDashoffset={-s.start * C}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
-          style={{ transition: "stroke-dashoffset 0.4s ease, stroke-dasharray 0.4s ease" }}
+          style={{ transition: "stroke-dashoffset 0.4s ease, stroke-dasharray 0.4s ease", cursor: "pointer" }}
+          onMouseEnter={() => setHovered(s)}
+          onMouseLeave={() => setHovered(null)}
+          onClick={() => setHovered((h) => (h && h.label === s.label ? null : s))}
         />
       )
     })
@@ -53,7 +69,7 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
     // Overflow: how far past the allowance, as a fraction of the allowance (the
     // part that "wraps"), capped at one extra lap for sanity.
     const overflowFrac = isOver ? Math.min(1, (spent - allowance) / allowance) : 0
-    const outerR = radius + stroke - 1
+    const outerR = radius + stroke / 2 + gap + overflowStroke / 2
     const outerC = 2 * Math.PI * outerR
 
     return (
@@ -70,7 +86,7 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
               r={outerR}
               fill="none"
               stroke="#ef4444"
-              strokeWidth={3}
+              strokeWidth={overflowStroke}
               strokeLinecap="round"
               strokeDasharray={`${overflowFrac * outerC} ${outerC}`}
               transform={`rotate(-90 ${size / 2} ${size / 2})`}
@@ -78,11 +94,22 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
             />
           )}
         </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className={`font-bold ${size >= 120 ? "text-2xl" : "text-xl"} ${isOver ? "text-red-400" : "text-gray-100"}`}>
-            {isOver ? `${Math.round((spent / allowance) * 100)}%` : `${usedPct}%`}
-          </span>
-          <span className="text-xs text-gray-500">used</span>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
+          {hovered ? (
+            <>
+              <span className="text-sm font-semibold leading-tight" style={{ color: hovered.color }}>
+                {hovered.label}
+              </span>
+              <span className="text-xs text-gray-300">{formatMoney(hovered.value)}</span>
+            </>
+          ) : (
+            <>
+              <span className={`font-bold ${size >= 120 ? "text-2xl" : "text-xl"} ${isOver ? "text-red-400" : "text-gray-100"}`}>
+                {isOver ? `${Math.round((spent / allowance) * 100)}%` : `${usedPct}%`}
+              </span>
+              <span className="text-xs text-gray-500">used</span>
+            </>
+          )}
         </div>
       </div>
     )

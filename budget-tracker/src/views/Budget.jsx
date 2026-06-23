@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { formatMoney } from "../lib/format"
 import { categoryIcon, categoryColor, isDebtPayment } from "../lib/categories"
-import { currentPeriod, isDateInPeriod } from "../lib/period"
+import { currentPeriod, isDateInPeriod, daysRemaining } from "../lib/period"
 import { buildBudgetPlan } from "../lib/budgetPlan"
 import { ringStats } from "../lib/ring"
 import BudgetRing from "../components/BudgetRing"
@@ -35,6 +35,10 @@ export default function Budget({
 }) {
   const today = new Date()
   const period = currentPeriod(today, salarySettings)
+  // Every ring is paced toward the next payday (day after the period ends), so
+  // "weekly" reads as a week in the run-up to payday, not a calendar-month week.
+  const nextPayday = new Date(period.end.getFullYear(), period.end.getMonth(), period.end.getDate() + 1)
+  const daysToPayday = daysRemaining(period, today)
 
   // The auto-budget waterfall: income → committed costs → needs-first split of the
   // rest. Recomputed every render, so it tracks income/debt/lent/spend changes live.
@@ -79,10 +83,18 @@ export default function Budget({
 
       {/* Daily / weekly / monthly rings — all three at once */}
       {hasBudget ? (
-        <div className={`grid gap-4 ${rings.length >= 3 ? "sm:grid-cols-3" : rings.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
-          {rings.map((r) => (
-            <RingCard key={r.key} label={r.label} stats={r.stats} />
-          ))}
+        <div>
+          <div className="mb-2 flex items-baseline justify-between">
+            <p className="text-sm font-medium text-gray-300">Spending pace</p>
+            <p className="text-xs text-gray-500">
+              toward next payday · {nextPayday.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ({daysToPayday}d)
+            </p>
+          </div>
+          <div className={`grid gap-4 ${rings.length >= 3 ? "sm:grid-cols-3" : rings.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
+            {rings.map((r) => (
+              <RingCard key={r.key} label={r.label} stats={r.stats} />
+            ))}
+          </div>
         </div>
       ) : (
         <div className="rounded-xl border border-gray-700 bg-gray-800 p-6 text-center text-sm text-gray-400">
@@ -305,7 +317,7 @@ function WaterfallRow({ label, value, tone = "text-gray-300", sign = "", bold = 
 // plus spent vs allowance and over/left, for the categories budgeted at that
 // cadence. A small per-category list sits under it.
 function RingCard({ label, stats }) {
-  const { spent, allowance, usedPct, remaining, over, rows, label: windowLabel, cadence, pool, poolRemaining } = stats
+  const { spent, allowance, usedPct, remaining, over, rows, extraRows, label: windowLabel, cadence, pool, poolRemaining } = stats
   // For daily/weekly the allowance is a pace; show the period pool underneath.
   const showPool = cadence !== "monthly"
 
@@ -313,44 +325,75 @@ function RingCard({ label, stats }) {
     <div className="flex flex-col items-center rounded-xl border border-gray-700 bg-gray-800 p-4 text-center">
       <p className="mb-3 text-sm font-medium text-gray-300">{label} budget</p>
       <BudgetRing
-        segments={rows.map((r) => ({ color: categoryColor(r.category), value: r.spent }))}
+        segments={rows.map((r) => ({ color: categoryColor(r.category), value: r.spent, label: r.category }))}
         allowance={allowance}
         pct={usedPct}
         over={over}
         size={120}
       />
-      <p className={`mt-3 text-xl font-bold ${over ? "text-red-400" : "text-gray-100"}`}>
-        {formatMoney(spent)}
+      {/* Hero: budget left for this window (distinct from the dashboard's cash
+          "safe to spend"). Goes to "over" when negative; figures reconcile below. */}
+      <p className={`mt-3 text-3xl font-bold ${over ? "text-red-400" : "text-green-400"}`}>
+        {over ? `${formatMoney(Math.abs(remaining))} over` : formatMoney(remaining)}
       </p>
-      <p className="text-xs text-gray-500">of {formatMoney(allowance)} {windowLabel}</p>
-      <p className={`mt-1 text-sm font-semibold ${over ? "text-red-400" : "text-green-400"}`}>
-        {over ? `${formatMoney(Math.abs(remaining))} over today` : `${formatMoney(remaining)} left ${cadence === "daily" ? "today" : cadence === "weekly" ? "this week" : ""}`}
+      <p className="text-xs text-gray-500">
+        {over ? `over ${windowLabel}'s budget` : `left in ${windowLabel}'s budget`}
+      </p>
+      <p className="mt-1 text-[11px] text-gray-500">
+        {formatMoney(spent)} spent of {formatMoney(allowance)} {windowLabel}
       </p>
       {showPool && (
-        <p className="mt-0.5 text-xs text-gray-500">
+        <p className="mt-0.5 text-[11px] text-gray-500">
           {formatMoney(poolRemaining)} of {formatMoney(pool)} left this period
         </p>
       )}
 
-      {/* Categories in this ring (monthly shows all, tagged with their cadence) */}
-      {rows.length > 0 && (
+      {/* Categories in this ring. The donut/% covers the ring's OWN cadence; finer
+          cadences (e.g. a daily category under the weekly ring) are listed below —
+          tagged, but kept out of the ring's totals above. */}
+      {(rows.length > 0 || extraRows.length > 0) && (
         <div className="mt-3 w-full space-y-1.5 border-t border-gray-700 pt-3 text-left">
           {rows.map((r) => (
-            <div key={r.category} className="flex items-center gap-2 text-xs">
-              <span aria-hidden>{categoryIcon(r.category)}</span>
-              <span className="min-w-0 flex-1 truncate text-gray-400">{r.category}</span>
-              {cadence === "monthly" && (
-                <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] capitalize text-gray-400">
-                  {r.cadence}
-                </span>
-              )}
-              <span className="shrink-0 text-gray-300">
-                {formatMoney(r.spent)} <span className="text-gray-600">/ {formatMoney(r.allotment)}</span>
-              </span>
-            </div>
+            <RingRow key={r.category} row={r} showCadence={cadence === "monthly"} />
           ))}
+          {extraRows.length > 0 && (
+            <div className="mt-2 space-y-1.5 border-t border-gray-700/60 pt-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Daily budget on weekly</p>
+              {extraRows.map((r) => (
+                <RingRow key={r.category} row={r} showCadence />
+              ))}
+            </div>
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+// One per-category line under a ring: spend, what's left (or over, in red), and a
+// small usage bar. Used for both the ring's own categories and the finer ones.
+function RingRow({ row, showCadence = false }) {
+  const { category, cadence, spent, left, pct, over, limit } = row
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span aria-hidden>{categoryIcon(category)}</span>
+      <span className="min-w-0 flex-1 truncate text-gray-400">{category}</span>
+      {showCadence && (
+        <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] capitalize text-gray-400">{cadence}</span>
+      )}
+      {limit > 0 ? (
+        <span className={`shrink-0 whitespace-nowrap font-medium ${over ? "text-red-400" : "text-gray-200"}`}>
+          {over ? `${formatMoney(-left)} over` : `${formatMoney(left)} left`}
+        </span>
+      ) : (
+        <span className="shrink-0 whitespace-nowrap text-gray-500">{formatMoney(spent)} spent</span>
+      )}
+      <div className="w-8 shrink-0 overflow-hidden rounded-full bg-gray-700" style={{ height: "3px" }}>
+        <div
+          className={`h-full rounded-full ${over || pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-green-500"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   )
 }

@@ -32,46 +32,76 @@ export function windowFor(cadence, period, today = new Date()) {
     return { start: period.start, end, label: "this period" }
   }
   if (cadence === "weekly") {
-    const start = new Date(startToday)
-    start.setDate(start.getDate() - 6) // last 7 days inclusive
+    const rollingStart = new Date(startToday)
+    rollingStart.setDate(rollingStart.getDate() - 6) // last 7 days inclusive
+    // Don't reach back past the start of the pay period: spend before payday was
+    // funded by the previous paycheck and belongs to that period's budget, so
+    // counting it under "this week" would double it against this period's pool.
+    const start = rollingStart < period.start ? new Date(period.start) : rollingStart
     return { start, end, label: "this week" }
   }
   return { start: startToday, end, label: "today" } // daily
 }
 
-// Which budgeted categories a ring covers. Daily/weekly rings cover only their
-// own cadence; the MONTHLY ring is the whole-period view, so it covers ALL
-// categories regardless of cadence.
+// Which budgeted categories a ring's MATH covers. The monthly ring is the whole-
+// period overview, so it totals every category. The daily/weekly rings track only
+// their OWN cadence, so each ring's pace % stays meaningful — mixing a daily pool
+// into the weekly pace would distort it and mask an overspend.
 function catsForRing(budgetLimits, cadence) {
   if (cadence === "monthly") return budgetLimits
   return budgetLimits.filter((b) => (b.cadence || "monthly") === cadence)
 }
 
-// Per-category rows for one cadence's window: each category the ring covers with
-// its spend vs its own limit. (No cross-cadence normalisation — the limit is
-// taken as-is, so Food's ₱4,000 stays ₱4,000.)
-export function categoryRows(transactions, budgetLimits, cadence, windowStart, windowEnd) {
-  const cats = catsForRing(budgetLimits, cadence)
+// Categories budgeted at a FINER cadence than this ring — listed beneath it for
+// reference, but kept OUT of the ring's pool/allowance/percentage. So a daily
+// category shows under the weekly ring without diluting its weekly pace. Nothing
+// is finer than daily, and the monthly ring already totals everything.
+const CADENCE_RANK = { daily: 0, weekly: 1, monthly: 2 }
+function finerCats(budgetLimits, cadence) {
+  if (cadence === "monthly") return []
+  const ringRank = CADENCE_RANK[cadence] ?? 2
+  return budgetLimits.filter((b) => (CADENCE_RANK[b.cadence] ?? 2) < ringRank)
+}
 
-  const spentByCat = {}
+// How many cadence-windows are left in the period, used to spread a remaining pool
+// into a per-window pace. weekly → whole weeks left; daily → days left; monthly →
+// 1 (the whole period is one window).
+function windowsLeft(cadence, period, today) {
+  const daysLeft = daysRemaining(period, today)
+  if (cadence === "weekly") return Math.max(1, Math.ceil(daysLeft / 7))
+  if (cadence === "daily") return Math.max(1, daysLeft)
+  return 1 // monthly
+}
+
+// Per-category rows for a ring. Every category — whether budgeted at the ring's own
+// cadence or a finer one — is shown AT THE RING'S cadence: its limit becomes a
+// per-window allowance, so a daily Food reads as a weekly figure inside the weekly
+// ring. `spent` is this window's spend, `allowance` the per-window budget, and
+// `left` what's still spendable this window (negative = over the pace).
+function buildRows(transactions, cats, cadence, period, periodEnd, win, divisor) {
+  const periodSpent = {}
+  const windowSpent = {}
   for (const t of transactions) {
     if (!isBudgetExpense(t) || !t.category) continue
     const d = new Date(t.created_at)
-    if (d >= windowStart && d <= windowEnd) {
-      spentByCat[t.category] = (spentByCat[t.category] || 0) + Number(t.amount)
-    }
+    const amt = Number(t.amount) || 0
+    if (d >= period.start && d <= periodEnd) periodSpent[t.category] = (periodSpent[t.category] || 0) + amt
+    if (d >= win.start && d <= win.end) windowSpent[t.category] = (windowSpent[t.category] || 0) + amt
   }
 
   return cats
     .map((b) => {
       const limit = Number(b.monthly_limit) || 0
-      const spent = spentByCat[b.category] || 0
-      const pct = limit > 0 ? Math.min(100, Math.round((spent / limit) * 100)) : 0
-      // Carry the category's OWN cadence (not the ring's), so the monthly ring can
-      // tag each row with how it's actually budgeted.
-      return { category: b.category, cadence: b.cadence || "monthly", spent, allotment: limit, pct, over: limit > 0 && spent > limit }
+      const spent = windowSpent[b.category] || 0
+      // This window's budget for the category: limit minus what was spent EARLIER in
+      // the period, spread across the windows left. (Monthly → divisor 1 → the whole
+      // limit.) Excluding this window's own spend keeps spent vs allowance coherent.
+      const allowance = Math.max(0, limit - ((periodSpent[b.category] || 0) - spent)) / divisor
+      const left = allowance - spent
+      const pct = allowance > 0 ? Math.min(100, Math.round((spent / allowance) * 100)) : spent > 0 ? 100 : 0
+      return { category: b.category, cadence: b.cadence || "monthly", limit, spent, allowance, left, over: limit > 0 && left < 0, pct }
     })
-    .filter((r) => r.allotment > 0 || r.spent > 0)
+    .filter((r) => r.limit > 0 || r.spent > 0)
     .sort((a, b) => b.spent - a.spent)
 }
 
@@ -105,17 +135,14 @@ export function ringStats(transactions, budgetLimits, period, cadence, today = n
   const poolRemaining = Math.max(0, pool - poolSpent)
   const spent = sumSpend(transactions, catNames, win.start, win.end)
 
-  // Allowance is the pace for this window so the remaining pool lasts to payday.
-  const daysLeft = daysRemaining(period, today)
-  let allowance
-  if (cadence === "monthly") {
-    allowance = pool // the whole period IS the month here
-  } else if (cadence === "weekly") {
-    const weeksLeft = Math.max(1, Math.ceil(daysLeft / 7))
-    allowance = poolRemaining / weeksLeft
-  } else {
-    allowance = poolRemaining / daysLeft // daily
-  }
+  // This window's budget: spread what was available at the START of the window —
+  // the pool minus spending from EARLIER in the period — across the windows left.
+  // Adding this window's own spend back (pool − (poolSpent − spent)) avoids
+  // double-counting it, so the figures reconcile (spent vs allowance) while staying
+  // adaptive: overspending an earlier week still shrinks the later weeks.
+  const divisor = windowsLeft(cadence, period, today)
+  const available = Math.max(0, pool - (poolSpent - spent))
+  const allowance = available / divisor
 
   const hasBudget = pool > 0
   const usedPct = hasBudget && allowance > 0 ? Math.min(100, Math.round((spent / allowance) * 100)) : 0
@@ -132,7 +159,9 @@ export function ringStats(transactions, budgetLimits, period, cadence, today = n
     remaining: allowance - spent,
     over: hasBudget && allowance > 0 && spent > allowance,
     hasBudget,
-    rows: categoryRows(transactions, budgetLimits, cadence, win.start, win.end),
+    rows: buildRows(transactions, cats, cadence, period, periodEnd, win, divisor),
+    // Finer-cadence categories shown beneath the ring, at this ring's cadence too.
+    extraRows: buildRows(transactions, finerCats(budgetLimits, cadence), cadence, period, periodEnd, win, divisor),
   }
 }
 

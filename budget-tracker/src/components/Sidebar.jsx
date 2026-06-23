@@ -58,22 +58,21 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
 
         <h1 className="mb-4 px-2 text-xl font-bold text-gray-100">Pahirap</h1>
 
-        {/* Install the PWA — sits at the top, just under the title. Renders
-            nothing when the app is already installed or not installable. */}
-        <InstallButton variant="dark" className="mb-4" />
+        <div className="mb-4">
+          <InstallButton />
+        </div>
 
         <nav className="flex flex-1 flex-col gap-1">
           {NAV_ITEMS.map((item) => (
             <button
               key={item.key}
               onClick={() => handleNav(item.key)}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
+              className={`rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
                 view === item.key
                   ? "bg-blue-600 text-white"
                   : "text-gray-300 hover:bg-gray-800"
               }`}
             >
-              <span aria-hidden>{item.icon}</span>
               {item.label}
             </button>
           ))}
@@ -81,6 +80,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
 
         <div className="mt-4 border-t border-gray-800 pt-4">
           <NotificationToggle />
+
           <p className="mt-2 truncate px-3 text-xs text-gray-500" title={email}>
             {email}
           </p>

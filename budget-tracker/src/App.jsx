@@ -5,6 +5,9 @@ import { supabase } from "./lib/supabase"
 import Auth from "./components/Auth"
 import Sidebar from "./components/Sidebar"
 import { NAV_ITEMS } from "./lib/nav"
+import { useOnlineStatus } from "./lib/useOnlineStatus"
+import { usePullToRefresh } from "./lib/usePullToRefresh"
+import { saveCache, loadCache, clearUserCache, queueWrite, getPendingWrites, clearPendingWrites, newTempId, isTempId, updateQueuedInsert, removeQueuedInsert, isNetworkError, replayWrite } from "./lib/offlineCache"
 import Dashboard from "./views/Dashboard"
 import Transactions from "./views/Transactions"
 import Income from "./views/Income"
@@ -20,6 +23,8 @@ import AddTransactionSheet from "./components/AddTransactionSheet"
 export default function App() {
   // `session` is null when logged out, or an object with the user when logged in.
   // `authReady` stops us flashing the login screen before we've checked.
+  const isOnline = useOnlineStatus()
+
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
 
@@ -50,10 +55,55 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // One wrapper for every mutation, so offline behaviour is uniform.
+  //
+  // It tries the live Supabase call first. If that fails because the NETWORK is
+  // unreachable (a thrown fetch error, or navigator.onLine === false), it queues
+  // the operation for later sync and runs the optimistic local update so the UI
+  // updates immediately. A real server rejection (constraint, auth, etc.) is
+  // surfaced as an error and NOT queued — retrying it wouldn't help.
+  //
+  // spec: {
+  //   write,            // a queued-write descriptor: { table, operation, payload?, match?, onConflict?, tempId? }
+  //   optimistic,       // () => void — apply the change to local state right now
+  //   onSynced,         // optional () => void — run after a successful LIVE write (e.g. refetch)
+  // }
+  // Returns true if it went through or was queued, false on a hard error.
+  async function runWrite({ write, optimistic, onSynced }) {
+    try {
+      const { error } = await replayWrite(supabase, write)
+      if (error) {
+        if (isNetworkError(error)) {
+          queueWrite(write)
+          optimistic?.()
+          setError(null)
+          return true
+        }
+        setError(error.message)
+        return false
+      }
+      onSynced?.()
+      return true
+    } catch (e) {
+      if (isNetworkError(e)) {
+        queueWrite(write)
+        optimistic?.()
+        setError(null)
+        return true
+      }
+      setError(e.message || String(e))
+      return false
+    }
+  }
+
   async function fetchTransactions() {
     setLoading(true)
-    // No need to filter by user here — Row Level Security only returns the
-    // logged-in user's own rows, so "select *" is already scoped to them.
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'transactions')
+      if (cached) setTransactions(cached)
+      setLoading(false)
+      return
+    }
     const { data, error } = await supabase
       .from("transactions")
       .select("*")
@@ -61,8 +111,11 @@ export default function App() {
 
     if (error) {
       setError(error.message)
+      const cached = loadCache(session.user.id, 'transactions')
+      if (cached) setTransactions(cached)
     } else {
       setTransactions(data)
+      saveCache(session.user.id, 'transactions', data)
       setError(null)
     }
     setLoading(false)
@@ -70,158 +123,188 @@ export default function App() {
 
   // Returns true on success so callers (e.g. the add sheet) know whether to close.
   async function addTransaction(transaction) {
-    // We don't pass user_id — the table's default (auth.uid()) fills it in.
-    const { error } = await supabase.from("transactions").insert([transaction])
-    if (error) {
-      setError(error.message)
-      return false
-    }
-    fetchTransactions()
-    // Nudge the push function to check budgets now, so an overspend pings you
-    // immediately rather than waiting for the next hourly cron run. Fire-and-
-    // forget: the server makes the real (de-duped) decision, and any failure
-    // here is swallowed so it never affects saving the transaction.
-    triggerInstantCheck()
-    return true
+    // The temp id is local-only — it never goes to Supabase (the insert payload
+    // has no id, so the DB assigns a real UUID on sync). We tag the queued write
+    // with the same tempId so a later offline edit/delete can find and amend it.
+    const tempId = newTempId()
+    const ok = await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: transaction, tempId },
+      optimistic: () => {
+        const temp = { ...transaction, id: tempId, created_at: new Date().toISOString() }
+        setTransactions((prev) => [temp, ...prev])
+      },
+      onSynced: () => { fetchTransactions(); triggerInstantCheck() },
+    })
+    return ok
   }
 
   async function deleteTransaction(id) {
-    const { error } = await supabase.from("transactions").delete().eq("id", id)
-    if (error) {
-      setError(error.message)
-    } else {
+    // An unsynced offline row only exists locally + as a queued insert. Sending
+    // its temp id to Supabase would error ("invalid input syntax for type
+    // uuid"), so just drop it from the queue and the UI.
+    if (isTempId(id)) {
+      removeQueuedInsert('transactions', id)
       setTransactions((prev) => prev.filter((t) => t.id !== id))
+      return
     }
+    await runWrite({
+      write: { table: 'transactions', operation: 'delete', match: { id } },
+      optimistic: () => setTransactions((prev) => prev.filter((t) => t.id !== id)),
+      onSynced: () => setTransactions((prev) => prev.filter((t) => t.id !== id)),
+    })
   }
 
   async function updateTransaction(id, fields) {
-    const { error } = await supabase.from("transactions").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchTransactions()
+    // Editing a not-yet-synced offline row: there's no DB row to update, so
+    // amend the queued insert payload and the local row instead. When it finally
+    // syncs, the edited values are what get inserted.
+    if (isTempId(id)) {
+      updateQueuedInsert('transactions', id, fields)
+      setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...fields } : t)))
+      return
+    }
+    await runWrite({
+      write: { table: 'transactions', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...fields } : t))),
+      onSynced: () => fetchTransactions(),
+    })
   }
 
   async function fetchSalarySettings() {
-    // maybeSingle() returns one row or null (rather than erroring when none exists).
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'salary_settings')
+      if (cached !== null) setSalarySettings(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("salary_settings")
       .select("*")
       .maybeSingle()
 
-    if (!error) setSalarySettings(data)
+    if (!error) {
+      setSalarySettings(data)
+      saveCache(session.user.id, 'salary_settings', data)
+    } else {
+      const cached = loadCache(session.user.id, 'salary_settings')
+      if (cached !== null) setSalarySettings(cached)
+    }
+  }
+
+  // Persist a partial change to the single salary_settings row (one per user,
+  // keyed by user_id). Goes through runWrite so it queues offline; the optimistic
+  // update merges `fields` into the current settings so the UI reflects it now.
+  async function saveSalaryFields(fields) {
+    const payload = { user_id: session.user.id, ...fields, updated_at: new Date().toISOString() }
+    await runWrite({
+      write: { table: 'salary_settings', operation: 'upsert', payload, onConflict: 'user_id' },
+      optimistic: () => setSalarySettings((prev) => ({ ...(prev || { user_id: session.user.id }), ...fields })),
+      onSynced: () => fetchSalarySettings(),
+    })
   }
 
   async function saveSalarySettings({ periodA, periodB, paydayA, paydayB }) {
-    // upsert = insert a row, or update it if one already exists for this user
-    // (user_id is the primary key, so onConflict targets it).
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          period_a_amount: periodA,
-          period_b_amount: periodB,
-          payday_a: paydayA,
-          payday_b: paydayB,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
-
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+    await saveSalaryFields({
+      period_a_amount: periodA,
+      period_b_amount: periodB,
+      payday_a: paydayA,
+      payday_b: paydayB,
+    })
   }
 
   async function skipPayday(dateISO) {
     // Mark a payday as "didn't get paid" by appending it to the skip list.
-    // upsert only touches the columns we pass, so the amounts are left alone.
     const current = salarySettings?.skipped_paydays ?? []
     if (current.includes(dateISO)) return
-
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          skipped_paydays: [...current, dateISO],
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
-
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+    await saveSalaryFields({ skipped_paydays: [...current, dateISO] })
   }
 
   async function unskipPayday(dateISO) {
     // Undo a skip: drop the date from the skip list.
     const current = salarySettings?.skipped_paydays ?? []
-    const { data, error } = await supabase
-      .from("salary_settings")
-      .upsert(
-        {
-          user_id: session.user.id,
-          skipped_paydays: current.filter((d) => d !== dateISO),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .maybeSingle()
-
-    if (error) setError(error.message)
-    else setSalarySettings(data)
+    await saveSalaryFields({ skipped_paydays: current.filter((d) => d !== dateISO) })
   }
 
   async function recordSalary({ dateISO, amount, label }) {
     // paid_for tags this as the salary for a specific payday. The unique index
     // means a second attempt at the same payday will error instead of duplicating.
-    const { error } = await supabase.from("transactions").insert([
-      {
-        name: `Salary (${label})`,
-        amount,
-        type: "income",
-        paid_for: dateISO,
-      },
-    ])
-    if (error) setError(error.message)
-    else fetchTransactions()
+    const row = { name: `Salary (${label})`, amount, type: "income", paid_for: dateISO }
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: row, tempId },
+      optimistic: () => setTransactions((prev) => [{ ...row, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchTransactions(),
+    })
   }
 
   async function fetchDebts() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'debts')
+      if (cached) setDebts(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("debts")
       .select("*")
       .order("created_at", { ascending: false })
 
-    if (error) setError(error.message)
-    else setDebts(data)
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'debts')
+      if (cached) setDebts(cached)
+    } else {
+      setDebts(data)
+      saveCache(session.user.id, 'debts', data)
+    }
   }
 
   async function addDebt(debt) {
-    const { error } = await supabase.from("debts").insert([debt])
-    if (error) setError(error.message)
-    else fetchDebts()
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'debts', operation: 'insert', payload: debt, tempId },
+      optimistic: () => setDebts((prev) => [{ ...debt, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchDebts(),
+    })
   }
 
   async function deleteDebt(id) {
-    const { error } = await supabase.from("debts").delete().eq("id", id)
-    if (error) setError(error.message)
-    else setDebts((prev) => prev.filter((d) => d.id !== id))
+    if (isTempId(id)) {
+      removeQueuedInsert('debts', id)
+      setDebts((prev) => prev.filter((d) => d.id !== id))
+      return
+    }
+    await runWrite({
+      write: { table: 'debts', operation: 'delete', match: { id } },
+      optimistic: () => setDebts((prev) => prev.filter((d) => d.id !== id)),
+      onSynced: () => setDebts((prev) => prev.filter((d) => d.id !== id)),
+    })
   }
 
   async function updateDebt(id, fields) {
-    const { error } = await supabase.from("debts").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchDebts()
+    if (isTempId(id)) {
+      updateQueuedInsert('debts', id, fields)
+      setDebts((prev) => prev.map((d) => (d.id === id ? { ...d, ...fields } : d)))
+      return
+    }
+    await runWrite({
+      write: { table: 'debts', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setDebts((prev) => prev.map((d) => (d.id === id ? { ...d, ...fields } : d))),
+      onSynced: () => fetchDebts(),
+    })
   }
 
   async function fetchBudgetLimits() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'budget_limits')
+      if (cached) setBudgetLimits(cached)
+      return
+    }
     const { data, error } = await supabase.from("budget_limits").select("*")
-    if (error) { setError(error.message); return }
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'budget_limits')
+      if (cached) setBudgetLimits(cached)
+      return
+    }
 
     if (data.length === 0) {
       // First visit — seed the default categories with no limit set yet.
@@ -234,60 +317,64 @@ export default function App() {
       if (seedError) { setError(seedError.message); return }
       const { data: seeded } = await supabase.from("budget_limits").select("*")
       setBudgetLimits(seeded ?? [])
+      saveCache(session.user.id, 'budget_limits', seeded ?? [])
       return
     }
 
     setBudgetLimits(data)
+    saveCache(session.user.id, 'budget_limits', data)
+  }
+
+  // Budget limits are keyed by (user_id, category) — there's no separate row id we
+  // act on, so offline edits match on those columns and the optimistic update
+  // patches the matching category row in local state. No temp-id dance needed.
+  const uid = () => session.user.id
+
+  function patchLimit(category, fields) {
+    setBudgetLimits((prev) => {
+      const exists = prev.some((b) => b.category === category)
+      if (exists) return prev.map((b) => (b.category === category ? { ...b, ...fields } : b))
+      return [...prev, { user_id: uid(), category, monthly_limit: 0, ...fields }]
+    })
   }
 
   async function saveBudgetLimit(category, limit) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .upsert(
-        { user_id: session.user.id, category, monthly_limit: limit },
-        { onConflict: "user_id,category" }
-      )
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'upsert', payload: { user_id: uid(), category, monthly_limit: limit }, onConflict: 'user_id,category' },
+      optimistic: () => patchLimit(category, { monthly_limit: limit }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Toggle whether a category takes part in the auto-budget. Off = the auto-split
   // skips it and shares its money among the rest.
   async function setCategoryAutoBudget(category, autoBudget) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .update({ auto_budget: autoBudget })
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'update', payload: { auto_budget: autoBudget }, match: { user_id: uid(), category } },
+      optimistic: () => patchLimit(category, { auto_budget: autoBudget }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Set how often a category's budget resets (daily / weekly / monthly).
   async function setCategoryCadence(category, cadence) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .update({ cadence })
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'update', payload: { cadence }, match: { user_id: uid(), category } },
+      optimistic: () => patchLimit(category, { cadence }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   // Apply an auto-budget: write a batch of { category, monthly_limit } rows in one
   // upsert. Used by the Budget page's "Apply suggested budget" button.
   async function applyBudgetLimits(rows) {
     if (!rows.length) return
-    const { error } = await supabase.from("budget_limits").upsert(
-      rows.map((r) => ({
-        user_id: session.user.id,
-        category: r.category,
-        monthly_limit: r.monthly_limit,
-      })),
-      { onConflict: "user_id,category" }
-    )
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    const payload = rows.map((r) => ({ user_id: uid(), category: r.category, monthly_limit: r.monthly_limit }))
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'upsert', payload, onConflict: 'user_id,category' },
+      optimistic: () => { for (const r of rows) patchLimit(r.category, { monthly_limit: r.monthly_limit }) },
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function addBudgetCategory(name) {
@@ -297,48 +384,74 @@ export default function App() {
       setError(`"${DEBT_CATEGORY}" is reserved for debt payments and can't be a budget category.`)
       return
     }
-    const { error } = await supabase
-      .from("budget_limits")
-      .insert({ user_id: session.user.id, category: name, monthly_limit: 0 })
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'insert', payload: { user_id: uid(), category: name, monthly_limit: 0 } },
+      optimistic: () => patchLimit(name, { monthly_limit: 0 }),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function removeBudgetCategory(category) {
-    const { error } = await supabase
-      .from("budget_limits")
-      .delete()
-      .eq("user_id", session.user.id)
-      .eq("category", category)
-    if (error) setError(error.message)
-    else fetchBudgetLimits()
+    await runWrite({
+      write: { table: 'budget_limits', operation: 'delete', match: { user_id: uid(), category } },
+      optimistic: () => setBudgetLimits((prev) => prev.filter((b) => b.category !== category)),
+      onSynced: () => fetchBudgetLimits(),
+    })
   }
 
   async function fetchLoans() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'loans')
+      if (cached) setLoans(cached)
+      return
+    }
     const { data, error } = await supabase
       .from("loans")
       .select("*")
       .order("created_at", { ascending: false })
-    if (error) setError(error.message)
-    else setLoans(data)
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'loans')
+      if (cached) setLoans(cached)
+    } else {
+      setLoans(data)
+      saveCache(session.user.id, 'loans', data)
+    }
   }
 
   async function addLoan(loan) {
-    const { error } = await supabase.from("loans").insert([loan])
-    if (error) setError(error.message)
-    else fetchLoans()
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'loans', operation: 'insert', payload: loan, tempId },
+      optimistic: () => setLoans((prev) => [{ ...loan, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchLoans(),
+    })
   }
 
   async function updateLoan(id, fields) {
-    const { error } = await supabase.from("loans").update(fields).eq("id", id)
-    if (error) setError(error.message)
-    else fetchLoans()
+    if (isTempId(id)) {
+      updateQueuedInsert('loans', id, fields)
+      setLoans((prev) => prev.map((l) => (l.id === id ? { ...l, ...fields } : l)))
+      return
+    }
+    await runWrite({
+      write: { table: 'loans', operation: 'update', payload: fields, match: { id } },
+      optimistic: () => setLoans((prev) => prev.map((l) => (l.id === id ? { ...l, ...fields } : l))),
+      onSynced: () => fetchLoans(),
+    })
   }
 
   async function deleteLoan(id) {
-    const { error } = await supabase.from("loans").delete().eq("id", id)
-    if (error) setError(error.message)
-    else setLoans((prev) => prev.filter((l) => l.id !== id))
+    if (isTempId(id)) {
+      removeQueuedInsert('loans', id)
+      setLoans((prev) => prev.filter((l) => l.id !== id))
+      return
+    }
+    await runWrite({
+      write: { table: 'loans', operation: 'delete', match: { id } },
+      optimistic: () => setLoans((prev) => prev.filter((l) => l.id !== id)),
+      onSynced: () => setLoans((prev) => prev.filter((l) => l.id !== id)),
+    })
   }
 
   // Record a debt payment: log it as an expense (which lowers the balance), then
@@ -351,42 +464,70 @@ export default function App() {
   async function payDebt(debt, payAmount) {
     const paid = Number(payAmount) > 0 ? Number(payAmount) : Number(debt.amount)
 
-    const { error: txError } = await supabase.from("transactions").insert([
-      { name: `Debt: ${debt.name}`, amount: paid, type: "expense", is_debt_payment: true, category: DEBT_CATEGORY },
-    ])
-    if (txError) {
-      setError(txError.message)
-      return
-    }
-
+    // Work out the debt-side change up front so we can apply it both to the live
+    // call and to the optimistic local state / queue.
+    const txRow = { name: `Debt: ${debt.name}`, amount: paid, type: "expense", is_debt_payment: true, category: DEBT_CATEGORY }
+    let debtOp // { kind: 'delete' } | { kind: 'update', fields }
     if (debt.kind === "lumpsum") {
-      await supabase.from("debts").delete().eq("id", debt.id)
+      debtOp = { kind: "delete" }
     } else if (debt.kind === "credit") {
       const newBalance = Math.max(0, (Number(debt.balance) || 0) - paid)
-      const update = { balance: newBalance }
-      // If the card tracks a due day, roll it to next month so it stops showing
-      // as "due this period" until the next statement (while a balance remains).
+      const fields = { balance: newBalance }
       if (debt.due_day && debt.next_due_date && newBalance > 0) {
-        update.next_due_date = advanceDue(debt.next_due_date, debt.due_day)
+        fields.next_due_date = advanceDue(debt.next_due_date, debt.due_day)
       }
-      await supabase.from("debts").update(update).eq("id", debt.id)
+      debtOp = { kind: "update", fields }
     } else {
       const monthsLeft = Math.max(0, (Number(debt.months_left) || 0) - 1)
-      await supabase
-        .from("debts")
-        .update({
+      debtOp = {
+        kind: "update",
+        fields: {
           months_left: monthsLeft,
-          // Advance the due date only while payments remain.
-          next_due_date:
-            monthsLeft > 0
-              ? advanceDue(debt.next_due_date, debt.due_day)
-              : debt.next_due_date,
-        })
-        .eq("id", debt.id)
+          next_due_date: monthsLeft > 0 ? advanceDue(debt.next_due_date, debt.due_day) : debt.next_due_date,
+        },
+      }
     }
 
-    fetchTransactions()
-    fetchDebts()
+    // Optimistic local update for the debt side (used when queued offline).
+    const applyDebtLocal = () => {
+      if (debtOp.kind === "delete") {
+        setDebts((prev) => prev.filter((d) => d.id !== debt.id))
+      } else {
+        setDebts((prev) => prev.map((d) => (d.id === debt.id ? { ...d, ...debtOp.fields } : d)))
+      }
+    }
+
+    // 1) The payment transaction (always an insert; offline gets a temp id).
+    const tempId = newTempId()
+    await runWrite({
+      write: { table: 'transactions', operation: 'insert', payload: txRow, tempId },
+      optimistic: () => setTransactions((prev) => [{ ...txRow, id: tempId, created_at: new Date().toISOString() }, ...prev]),
+      onSynced: () => fetchTransactions(),
+    })
+
+    // 2) The debt mutation. If the debt itself is an unsynced offline row, amend
+    // its queued insert / local row instead of hitting the DB with a temp id.
+    if (isTempId(debt.id)) {
+      if (debtOp.kind === "delete") {
+        removeQueuedInsert('debts', debt.id)
+        setDebts((prev) => prev.filter((d) => d.id !== debt.id))
+      } else {
+        updateQueuedInsert('debts', debt.id, debtOp.fields)
+        setDebts((prev) => prev.map((d) => (d.id === debt.id ? { ...d, ...debtOp.fields } : d)))
+      }
+    } else if (debtOp.kind === "delete") {
+      await runWrite({
+        write: { table: 'debts', operation: 'delete', match: { id: debt.id } },
+        optimistic: applyDebtLocal,
+        onSynced: () => fetchDebts(),
+      })
+    } else {
+      await runWrite({
+        write: { table: 'debts', operation: 'update', payload: debtOp.fields, match: { id: debt.id } },
+        optimistic: applyDebtLocal,
+        onSynced: () => fetchDebts(),
+      })
+    }
   }
 
   // On first load: check for an existing session, then keep it in sync.
@@ -405,9 +546,18 @@ export default function App() {
     return () => listener.subscription.unsubscribe()
   }, [])
 
-  // Load (or clear) the user's data whenever the logged-in user changes.
+  // Load (or clear) the user's data whenever the logged-in USER changes.
+  //
+  // We key this on the user id, not the whole session object: Supabase fires
+  // onAuthStateChange (with a fresh session object) on every token refresh —
+  // including the refresh that happens the moment you reconnect after being
+  // offline. If we reloaded on the object identity, that refetch would race the
+  // offline-write flush and overwrite the optimistic rows before they sync,
+  // making the transaction vanish. Keying on the id means a refresh for the
+  // same user is a no-op here.
+  const userId = session?.user?.id ?? null
   useEffect(() => {
-    if (session) {
+    if (userId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchTransactions()
       fetchSalarySettings()
@@ -421,11 +571,132 @@ export default function App() {
       setBudgetLimits([])
       setLoans([])
     }
-  }, [session])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
+
+  // Flush queued offline writes. Triggered by several signals so we don't miss
+  // reconnects on mobile: the `online` event, `visibilitychange` (app comes to
+  // foreground), session load, and an automatic retry timer. All check
+  // navigator.onLine directly rather than going through React state, avoiding
+  // the timing gap between the browser event and the React state update.
+  useEffect(() => {
+    if (!userId) return
+
+    // iOS Safari fires `online` a beat before the network is actually usable, so
+    // the first fetch after reconnect often dies with "Load failed". We treat
+    // that as transient and retry on a short backoff rather than surfacing it.
+    let flushing = false        // re-entrancy guard (triggers can overlap)
+    let retryTimer = null
+    let attempt = 0
+    const BACKOFFS = [1000, 3000, 6000, 12000] // ms
+
+    // A failure we should retry (network not ready, token not refreshed) vs.
+    // report (a real rejection — retrying the same payload won't help).
+    function isTransient(message) {
+      const m = (message || '').toLowerCase()
+      return isNetworkError({ message }) || m.includes('jwt') || m.includes('token')
+    }
+
+    async function tryFlush() {
+      if (flushing || !navigator.onLine) return
+      const pending = getPendingWrites()
+      if (!pending.length) return
+      flushing = true
+
+      try {
+        // Refresh the token first — on reconnect the JWT may have expired offline.
+        try { await supabase.auth.getSession() } catch { /* retried below */ }
+
+        const stillFailing = []
+        let hardError = null
+        for (const write of pending) {
+          // Supabase reports failures in the result object, not by throwing — but
+          // a dead network DOES throw, so we handle both. replayWrite knows how to
+          // turn any queued op (insert/update/delete/upsert, matched on any
+          // columns) back into the right Supabase call.
+          let result
+          try {
+            result = await replayWrite(supabase, write)
+          } catch (e) {
+            result = { error: e }
+          }
+          if (result?.error) {
+            const message = result.error.message || String(result.error)
+            stillFailing.push(write)
+            if (!isTransient(message)) hardError = message // a real, non-retryable error
+          }
+        }
+
+        if (stillFailing.length > 0) {
+          localStorage.setItem('pahirap_pending_writes', JSON.stringify(stillFailing))
+          if (hardError) {
+            // Won't fix itself — tell the user and stop the retry loop.
+            setError(`Couldn't sync an offline change: ${hardError}`)
+          } else {
+            // Transient network blip — schedule an automatic retry, no scary error.
+            setError(null)
+            if (attempt < BACKOFFS.length) {
+              const delay = BACKOFFS[attempt++]
+              clearTimeout(retryTimer)
+              retryTimer = setTimeout(() => { flushing = false; tryFlush() }, delay)
+              flushing = false
+              return
+            }
+          }
+          flushing = false
+          return // don't refetch — would wipe unsynced optimistic rows
+        }
+
+        // Success: reset retry state, clear the queue, replace optimistic rows.
+        attempt = 0
+        clearTimeout(retryTimer)
+        clearPendingWrites()
+        setError(null)
+        fetchTransactions()
+        fetchSalarySettings()
+        fetchDebts()
+        fetchBudgetLimits()
+        fetchLoans()
+      } finally {
+        flushing = false
+      }
+    }
+
+    // Run immediately — catches pending writes from a previous offline session.
+    tryFlush()
+
+    function onOnline() { attempt = 0; tryFlush() }
+    function onVisible() { if (!document.hidden) { attempt = 0; tryFlush() } }
+
+    window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearTimeout(retryTimer)
+      window.removeEventListener('online', onOnline)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   async function signOut() {
+    if (session) clearUserCache(session.user.id)
     await supabase.auth.signOut()
   }
+
+  // Pull-to-refresh: re-pull everything from the server. Runs in parallel so the
+  // spinner doesn't drag on. (The flush effect already handles syncing queued
+  // offline writes; this is purely a manual "get me the latest" gesture.)
+  async function refreshAll() {
+    await Promise.all([
+      fetchTransactions(),
+      fetchSalarySettings(),
+      fetchDebts(),
+      fetchBudgetLimits(),
+      fetchLoans(),
+    ])
+  }
+
+  const { containerRef: scrollRef, distance: pullDistance, refreshing: pullRefreshing, threshold: pullThreshold } = usePullToRefresh(refreshAll)
 
   // Still checking the session — show nothing rather than a flash of the login form.
   if (!authReady) {
@@ -527,7 +798,35 @@ export default function App() {
         onToggleCollapsed={toggleSidebarCollapsed}
       />
 
-      <main className="flex-1 overflow-y-auto p-6">
+      <main ref={scrollRef} className="relative flex-1 overflow-y-auto">
+        {/* Pull-to-refresh indicator — a spinner that follows the finger on
+            mobile, then spins while data reloads. Hidden at rest (distance 0). */}
+        {pullDistance > 0 && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center"
+            style={{ transform: `translateY(${pullDistance - 28}px)`, transition: pullRefreshing ? "none" : "transform 0.15s ease-out" }}
+          >
+            <div className="rounded-full bg-gray-800 p-2 shadow-lg">
+              <svg
+                className={`h-5 w-5 text-blue-400 ${pullRefreshing ? "animate-spin" : ""}`}
+                style={pullRefreshing ? undefined : { transform: `rotate(${(pullDistance / pullThreshold) * 270}deg)` }}
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            </div>
+          </div>
+        )}
+        {!isOnline && (
+          <div className="flex items-center gap-2 border-b border-amber-700/40 bg-amber-950/60 px-6 py-2 text-sm text-amber-300">
+            <span>●</span>
+            <span>
+              You&apos;re offline — showing cached data.
+              {getPendingWrites().length > 0 && ` ${getPendingWrites().length} change${getPendingWrites().length === 1 ? '' : 's'} will sync when you reconnect.`}
+            </span>
+          </div>
+        )}
+        <div className="p-6">
         <div className="mx-auto">
           <div className="mb-6 flex items-center gap-3">
             {/* Mobile: open the slide-over. */}
@@ -558,6 +857,7 @@ export default function App() {
           )}
 
           {renderView()}
+        </div>
         </div>
       </main>
 

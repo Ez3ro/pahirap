@@ -241,7 +241,9 @@ export function summariseDebts(debts, today, dueWindow) {
     const amount = Number(debt.amount) || 0
 
     if (debt.kind === "recurring") {
-      recurringTotal += amount
+      // A finished debt (no months left) is no longer a monthly commitment, so it
+      // mustn't keep adding its old payment to the recurring total.
+      if ((Number(debt.months_left) || 0) > 0) recurringTotal += amount
       if (debtStatus(debt, today).isLate) lateCount++
     } else if (debt.kind === "credit" && owedFor(debt) > 0) {
       // A card with a balance is a monthly commitment too — its minimum payment.
