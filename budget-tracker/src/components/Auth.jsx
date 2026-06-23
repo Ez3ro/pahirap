@@ -1,6 +1,5 @@
 import { useState } from "react"
 import { supabase } from "../lib/supabase"
-import { useInstallPrompt } from "../lib/useInstallPrompt"
 import InstallButton from "./InstallButton"
 
 // Some apps (Messenger, Instagram, Facebook, TikTok, WeChat, etc.) open links in
@@ -59,9 +58,6 @@ export default function Auth() {
 
   // In an embedded in-app browser, Google OAuth is blocked — warn and offer alternatives.
   const inApp = isInAppBrowser()
-  // Only show the install pitch when the app is actually installable here
-  // (a pending Android prompt or an iOS Safari session).
-  const { canInstall, isIOS } = useInstallPrompt()
 
   return (
     // Mobile: a single non-scrolling screen (h-screen + overflow-hidden), tightened
@@ -96,15 +92,14 @@ export default function Auth() {
           </div>
 
           {/* Install prompt — sits between the pitch and the login card so new
-              users see it before they've signed up. Android fires the native
-              prompt; iOS opens a short visual Add-to-Home-Screen guide. */}
-          {(canInstall || isIOS) && (
-            <div className="mt-4 rounded-xl border border-blue-700/40 bg-blue-950/40 p-4">
-              <p className="text-sm font-medium text-blue-300">Works as a phone app</p>
-              <p className="mt-0.5 text-xs text-blue-400/80">No App Store needed — installs straight from your browser.</p>
-              <InstallButton className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500" />
-            </div>
-          )}
+              users see it before they've signed up. Always shown here: Android
+              fires the native prompt, iOS opens a visual Add-to-Home-Screen
+              guide, and anywhere else the button shows a short how-to hint. */}
+          <div className="mt-4 rounded-xl border border-blue-700/40 bg-blue-950/40 p-4">
+            <p className="text-sm font-medium text-blue-300">Works as a phone app</p>
+            <p className="mt-0.5 text-xs text-blue-400/80">No App Store needed — installs straight from your browser.</p>
+            <InstallButton alwaysShow className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500" />
+          </div>
 
           {/* Login / signup card */}
           <div className="mt-5 w-full rounded-xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800 sm:p-6">
@@ -187,11 +182,6 @@ export default function Auth() {
             : "Already have an account? Sign in"}
           </button>
           </div>
-
-          {/* Install the PWA — a quiet secondary action below the card, so it
-              doesn't compete with sign in. Renders nothing when the app is
-              already installed or not installable. */}
-          <InstallButton alwaysShow className="mt-4" />
         </div>
       </div>
     </div>

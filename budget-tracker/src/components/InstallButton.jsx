@@ -7,17 +7,30 @@ import { useInstallPrompt } from "../lib/useInstallPrompt"
 //     Share → "Add to Home Screen" flow. We can't trigger it, but we CAN tap a
 //     button that pops a short visual guide pointing at exactly what to press.
 //
-// Renders nothing once installed, or on a desktop browser with no prompt.
-export default function InstallButton({ className = "" }) {
-  const { canInstall, isIOS, install } = useInstallPrompt()
+// Renders nothing once installed, or on a desktop browser with no prompt —
+// unless `alwaysShow` is set, in which case the button is always visible and a
+// click with no native prompt available pops a short how-to hint instead.
+export default function InstallButton({ className = "", alwaysShow = false }) {
+  const { canInstall, isIOS, isInstalled, install } = useInstallPrompt()
   const [showGuide, setShowGuide] = useState(false)
+  const [showHint, setShowHint] = useState(false)
 
-  if (!canInstall && !isIOS) return null
+  // Already installed → nothing to offer, even in alwaysShow mode.
+  if (isInstalled) return null
+  if (!alwaysShow && !canInstall && !isIOS) return null
+
+  function handleClick() {
+    if (canInstall) install()
+    else if (isIOS) setShowGuide(true)
+    // No native prompt and not iOS (e.g. desktop, or the browser hasn't armed
+    // the prompt yet) → guide the user to the browser's own install option.
+    else setShowHint(true)
+  }
 
   return (
     <>
       <button
-        onClick={() => (canInstall ? install() : setShowGuide(true))}
+        onClick={handleClick}
         className={
           className ||
           "w-full rounded-lg border border-blue-700/50 bg-blue-950/40 px-3 py-2 text-sm text-blue-300 hover:bg-blue-900/40"
@@ -25,6 +38,13 @@ export default function InstallButton({ className = "" }) {
       >
         Install app
       </button>
+
+      {showHint && (
+        <p className="mt-2 text-xs text-blue-300/80">
+          Open your browser menu and choose <span className="font-medium">Install app</span> — or
+          tap the install icon in the address bar.
+        </p>
+      )}
 
       {showGuide && <IOSInstallGuide onClose={() => setShowGuide(false)} />}
     </>
