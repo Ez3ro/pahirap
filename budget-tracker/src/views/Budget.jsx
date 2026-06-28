@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { formatMoney } from "../lib/format"
 import { categoryIcon, categoryColor, isDebtPayment } from "../lib/categories"
-import { currentPeriod, isDateInPeriod, daysRemaining } from "../lib/period"
+import { currentPeriod, isDateInPeriod, daysRemaining, fundedThisPeriod } from "../lib/period"
 import { buildBudgetPlan } from "../lib/budgetPlan"
 import { ringStats } from "../lib/ring"
 import BudgetRing from "../components/BudgetRing"
@@ -90,7 +90,7 @@ export default function Budget({
               toward next payday · {nextPayday.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ({daysToPayday}d)
             </p>
           </div>
-          <div className={`grid gap-4 ${rings.length >= 3 ? "sm:grid-cols-3" : rings.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
+          <div className={`grid min-w-0 gap-4 ${rings.length >= 3 ? "sm:grid-cols-3" : rings.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
             {rings.map((r) => (
               <RingCard key={r.key} label={r.label} stats={r.stats} />
             ))}
@@ -109,6 +109,8 @@ export default function Budget({
             key={b.category}
             category={b.category}
             limit={Number(b.monthly_limit)}
+            funded={fundedThisPeriod(b.monthly_limit, b.cadence, salarySettings)}
+            paychecksPerMonth={period.paychecksPerMonth}
             spent={spent[b.category] || 0}
             autoBudget={b.auto_budget !== false}
             cadence={b.cadence || "monthly"}
@@ -222,11 +224,14 @@ function AutoBudgetPlan({ plan, period, onApplyBudget }) {
         {plan.lentOut > 0 && (
           <WaterfallRow label="Lent out this period" value={plan.lentOut} tone="text-amber-400" sign="−" />
         )}
-        {plan.alreadySpent > 0 && (
-          <WaterfallRow label="Already spent this period" value={plan.alreadySpent} tone="text-gray-300" sign="−" />
+        {plan.manualReserved > 0 && (
+          <WaterfallRow label="Your set category budgets" value={plan.manualReserved} tone="text-gray-300" sign="−" />
         )}
-        {plan.manualTotal > 0 && (
-          <WaterfallRow label="Your set category budgets" value={plan.manualTotal} tone="text-gray-300" sign="−" />
+        {/* Only spend in UN-budgeted categories is its own line — spend inside a
+            budgeted category is already covered by the reservation above, so
+            showing it again here is what made the total read too low. */}
+        {plan.spentUnreserved > 0 && (
+          <WaterfallRow label="Spent (unbudgeted categories)" value={plan.spentUnreserved} tone="text-gray-300" sign="−" />
         )}
         <div className="border-t border-violet-800/60 pt-1.5">
           <WaterfallRow
@@ -322,7 +327,7 @@ function RingCard({ label, stats }) {
   const showPool = cadence !== "monthly"
 
   return (
-    <div className="flex flex-col items-center rounded-xl border border-gray-700 bg-gray-800 p-4 text-center">
+    <div className="flex min-w-0 flex-col items-center rounded-xl border border-gray-700 bg-gray-800 p-4 text-center">
       <p className="mb-3 text-sm font-medium text-gray-300">{label} budget</p>
       <BudgetRing
         segments={rows.map((r) => ({ color: categoryColor(r.category), value: r.spent, label: r.category }))}
@@ -333,7 +338,10 @@ function RingCard({ label, stats }) {
       />
       {/* Hero: budget left for this window (distinct from the dashboard's cash
           "safe to spend"). Goes to "over" when negative; figures reconcile below. */}
-      <p className={`mt-3 text-3xl font-bold ${over ? "text-red-400" : "text-green-400"}`}>
+      <p
+        className={`mt-3 max-w-full truncate text-3xl font-bold ${over ? "text-red-400" : "text-green-400"}`}
+        title={over ? `${formatMoney(Math.abs(remaining))} over` : formatMoney(remaining)}
+      >
         {over ? `${formatMoney(Math.abs(remaining))} over` : formatMoney(remaining)}
       </p>
       <p className="text-xs text-gray-500">
@@ -420,15 +428,22 @@ function AutoToggle({ on, onChange }) {
   )
 }
 
-function CategoryCard({ category, limit, spent, autoBudget = true, cadence = "monthly", onSave, onToggleAuto, onSetCadence, onRemove }) {
+function CategoryCard({ category, limit, funded, paychecksPerMonth = 1, spent, autoBudget = true, cadence = "monthly", onSave, onToggleAuto, onSetCadence, onRemove }) {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(limit || "")
   const [saving, setSaving] = useState(false)
 
-  const remaining    = limit > 0 ? limit - spent : null
+  // You set a MONTHLY budget, but only this paycheck's share is funded now
+  // (monthly ÷ paychecks per month). Spending this period is compared against the
+  // FUNDED amount, so the card never implies you can spend next paycheck's money.
+  const fundedLimit = funded != null ? funded : limit
+  // Every budget is a monthly amount, split across the month's paychecks — so show
+  // the "this paycheck" share whenever there's more than one paycheck a month.
+  const splitMonthly = paychecksPerMonth > 1 && limit > 0
+  const remaining    = fundedLimit > 0 ? fundedLimit - spent : null
   const isOver       = remaining !== null && remaining < 0
   // Bar shows REMAINING budget — starts full, shrinks as you spend.
-  const remainingPct = limit > 0 ? Math.max(0, Math.round(((limit - spent) / limit) * 100)) : null
+  const remainingPct = fundedLimit > 0 ? Math.max(0, Math.round(((fundedLimit - spent) / fundedLimit) * 100)) : null
 
   const barColor =
     remainingPct === null  ? "bg-blue-500"
@@ -515,12 +530,19 @@ function CategoryCard({ category, limit, spent, autoBudget = true, cadence = "mo
             </button>
           </div>
         ) : (
-          <button
-            onClick={() => { setValue(limit || ""); setEditing(true) }}
-            className="text-sm text-gray-400 hover:text-gray-200"
-          >
-            {limit > 0 ? `/ ${formatMoney(limit)}` : "Set limit"}
-          </button>
+          <div className="text-right">
+            <button
+              onClick={() => { setValue(limit || ""); setEditing(true) }}
+              className="text-sm text-gray-400 hover:text-gray-200"
+            >
+              {limit > 0 ? `/ ${formatMoney(limit)}/mo` : "Set limit"}
+            </button>
+            {splitMonthly && (
+              <p className="mt-0.5 text-[11px] text-gray-500" title="Your monthly budget, split across this month's paychecks">
+                {formatMoney(fundedLimit)} this paycheck
+              </p>
+            )}
+          </div>
         )}
       </div>
 

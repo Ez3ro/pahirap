@@ -75,6 +75,10 @@ export function currentPeriod(today, settings) {
     end,
     payDay: start.getDate(),
     label: `${ordinal(start.getDate())} → ${ordinal(nextStart.getDate())}`,
+    // How many paychecks fund the month this period sits in. Carried on the period
+    // so ring/summary math can split a MONTHLY budget across paychecks (this
+    // period's share = monthly ÷ this) without re-threading settings everywhere.
+    paychecksPerMonth: Math.max(1, paydays.length),
   }
 }
 
@@ -89,6 +93,45 @@ function ordinal(n) {
 export function daysInPeriod(period) {
   const ms = startOfDay(period.end) - startOfDay(period.start)
   return Math.round(ms / 86400000) + 1
+}
+
+// How many weeks a period is worth for BUDGETING — i.e. the divisor that turns a
+// funded period amount into a weekly figure. We round to the nearest whole week
+// (15 days → round(2.14) = 2 weeks), not ceil, so a ~2-week paycheck reads as
+// 2 weeks: ₱2,000 funded ÷ 2 = ₱1,000/week, matching how you think of it. (ceil
+// gave 3 → ₱666/week, which was the surprising result.) Clamped to ≥1 for very
+// short periods.
+export function weeksInPeriod(period) {
+  return Math.max(1, Math.round(daysInPeriod(period) / 7))
+}
+
+// How many windows of a given cadence a period contains: daily → days in period,
+// weekly → weeks in period, monthly → 1. The ring divides a category's period
+// limit by this to get a FIXED per-window budget (₱/day = pool ÷ days in period),
+// which stays the same all period and never reacts to spending.
+export function windowsInPeriod(cadence, period) {
+  if (cadence === "daily") return daysInPeriod(period)
+  if (cadence === "weekly") return weeksInPeriod(period)
+  return 1 // monthly — the limit already IS the whole-period budget
+}
+
+// How many paychecks land in a month — i.e. how many distinct paydays you've
+// configured. A MONTHLY budget is funded across these, so each pay period only
+// gets its share. With the default 5th & 20th that's 2; one payday set = 1.
+export function paychecksPerMonth(settings) {
+  return Math.max(1, paydaysFromSettings(settings).length)
+}
+
+// The portion of a budget that THIS pay period is funded by. EVERY budget amount
+// is a MONTHLY figure (the cadence is only which ring you VIEW it in, not what the
+// number means). A month has more than one paycheck, so this period is funded only
+// its share — the rest arrives with the next paycheck and isn't spendable yet.
+// This is what stops a budget from letting you spend money you haven't been paid.
+//   funded this period = monthly amount ÷ paychecks per month
+// The `cadence` arg is intentionally ignored here — cadence affects only how this
+// funded amount is later spread into a daily/weekly window (see windowsInPeriod).
+export function fundedThisPeriod(limit, _cadence, settings) {
+  return (Number(limit) || 0) / paychecksPerMonth(settings)
 }
 
 // Days left in the period counting today (today through the last day, inclusive).

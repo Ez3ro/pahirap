@@ -7,5 +7,6 @@ export const NAV_ITEMS = [
   { key: "income", label: "Income", icon: null },
   { key: "debts", label: "Debts", icon: null },
   { key: "budget", label: "Budget", icon: null },
+  { key: "history", label: "History", icon: null },
   { key: "lent", label: "Lent Money", icon: null },
 ]

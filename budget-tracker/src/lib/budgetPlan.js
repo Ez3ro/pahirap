@@ -163,12 +163,22 @@ export function buildBudgetPlan({ transactions, debts, budgetLimits, loans = [],
   const optedOut = (b) => b.auto_budget === false
   const included = budgetLimits.filter((b) => !optedOut(b))
 
+  // Budgets are set MONTHLY but income arrives per paycheck, so a monthly limit
+  // only reserves its per-paycheck share this period (monthly ÷ paychecks in the
+  // month, carried on the period). Otherwise a ₱4,000/mo budget would over-reserve
+  // against a single paycheck's income. daily/weekly limits are already per-period.
+  // Every budget amount is MONTHLY; a month has more than one paycheck, so this
+  // period reserves only its share (monthly ÷ paychecks). Cadence is just the view,
+  // not the funding unit, so the split applies to every category regardless.
+  const perPaycheck = Math.max(1, period.paychecksPerMonth || 1)
+  const fundedOf = (b) => (Number(b.monthly_limit) || 0) / perPaycheck
+
   // Among included categories: those with a manual limit (>0) are respected as-is;
   // the rest are "unset" and get auto-allocated. Money already spent this period is
   // taken off the pot too, so the suggestion only plans what's genuinely still free.
   const manual = included.filter((b) => Number(b.monthly_limit) > 0)
   const unset = included.filter((b) => Number(b.monthly_limit) <= 0)
-  const manualTotal = manual.reduce((s, b) => s + Number(b.monthly_limit), 0)
+  const manualTotal = manual.reduce((s, b) => s + fundedOf(b), 0)
 
   // Per-category discretionary spend this period, so we can tell spend that's
   // already covered by a manual reservation apart from spend that isn't.
@@ -185,7 +195,7 @@ export function buildBudgetPlan({ transactions, debts, budgetLimits, loans = [],
   // within the limit is already inside the reservation, so it isn't charged twice.
   const manualCats = new Set(manual.map((b) => b.category))
   const manualReserved = manual.reduce(
-    (s, b) => s + Math.max(Number(b.monthly_limit), spentByCat[b.category] || 0),
+    (s, b) => s + Math.max(fundedOf(b), spentByCat[b.category] || 0),
     0
   )
 
@@ -207,13 +217,24 @@ export function buildBudgetPlan({ transactions, debts, budgetLimits, loans = [],
     const current = Number(b.monthly_limit)
     const excluded = optedOut(b)
     const isAuto = !excluded && current <= 0
-    // Round auto amounts to whole pesos — nobody budgets to the centavo.
-    const suggested = isAuto ? Math.round(alloc[b.category] || 0) : current
+    // The allocator works in per-PAYCHECK money (leftover = this period's income),
+    // but budgets are stored as MONTHLY amounts. So an auto suggestion is scaled
+    // up by paychecks-per-month before it's shown/stored, matching how a manual
+    // monthly limit is funded (monthly ÷ paychecks) elsewhere. Manual categories
+    // keep their existing monthly value. Rounded — nobody budgets to the centavo.
+    const suggested = isAuto ? Math.round((alloc[b.category] || 0) * perPaycheck) : current
     return { category: b.category, current, suggested, isAuto, excluded, tier: budgetRuleFor(b.category).tier }
   })
 
   // Kill-order target for the "throw extra at debt" suggestion.
   const target = snowballOrder(debts, period.start)[0] ?? null
+
+  // "True spare" this paycheck: what's genuinely free after EVERYTHING — committed
+  // costs, the money still reserved by your set budgets that you haven't spent yet,
+  // and any unbudgeted spend. = afterCommitted − manualReserved − spentUnreserved,
+  // which is exactly `leftover` before it's clamped at 0; expose it so a dashboard
+  // stat can show real spare (and go negative as a warning) without the clamp.
+  const trueSpare = afterCommitted - manualReserved - spentUnreserved
 
   return {
     income,
@@ -221,9 +242,20 @@ export function buildBudgetPlan({ transactions, debts, budgetLimits, loans = [],
     debtPaid,
     lentOut,
     alreadySpent,
+    // Spend in categories with NO budget set — the only spend the waterfall shows
+    // as its own line. Spend INSIDE a budgeted category is folded into that
+    // category's reservation (manualTotal/manualReserved), so it isn't subtracted
+    // twice (the bug that made "Left to budget" read too low).
+    spentUnreserved,
     afterCommitted,
     manualTotal,
+    // What your set budgets actually hold back this period: each category at its
+    // funded limit, OR what's been spent in it if that's more (overspend has to be
+    // covered). Using this in the waterfall (not manualTotal) makes the rows sum
+    // exactly to "Left to budget" even when a category is over.
+    manualReserved,
     leftover,
+    trueSpare: Math.round(trueSpare),
     allocations,
     surplus: Math.round(surplus),
     killTarget: target ? { name: target.name, amount: Number(target.amount) || 0 } : null,

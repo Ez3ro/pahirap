@@ -74,7 +74,7 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
 
     return (
       <div className="relative" style={{ width: size, height: size }}>
-        <svg width={size} height={size}>
+        <svg className="block shrink-0" style={{ width: size, height: size }} width={size} height={size}>
           {/* Track */}
           <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#374151" strokeWidth={stroke} />
           {arcs}
@@ -126,7 +126,7 @@ export default function BudgetRing({ pct = 0, over = false, segments = null, all
 
   return (
     <div className="relative" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
+      <svg width={size} height={size} className="block shrink-0 -rotate-90" style={{ width: size, height: size }}>
         <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#374151" strokeWidth={stroke} />
         <circle
           cx={size / 2}

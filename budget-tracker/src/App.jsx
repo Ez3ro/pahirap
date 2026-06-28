@@ -13,7 +13,9 @@ import Transactions from "./views/Transactions"
 import Income from "./views/Income"
 import Debts from "./views/Debts"
 import Budget from "./views/Budget"
+import History from "./views/History"
 import LentMoney from "./views/LentMoney"
+import { dayKey, canMarkNoSpend } from "./lib/streak"
 import { advanceDue } from "./lib/debts"
 import { DEFAULT_CATEGORIES, DEBT_CATEGORY } from "./lib/categories"
 import { triggerInstantCheck } from "./lib/notifications"
@@ -52,6 +54,7 @@ export default function App() {
   const [debts, setDebts] = useState([])
   const [budgetLimits, setBudgetLimits] = useState([])
   const [loans, setLoans] = useState([])
+  const [noSpendDays, setNoSpendDays] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -454,6 +457,40 @@ export default function App() {
     })
   }
 
+  // No-spend marks — explicit "I had nothing to spend today" days, the one piece
+  // of streak state that can't be derived (a zero-transaction day is otherwise
+  // indistinguishable from an untracked one). Cached like the rest for offline.
+  async function fetchNoSpendDays() {
+    if (!navigator.onLine) {
+      const cached = loadCache(session.user.id, 'no_spend_days')
+      if (cached) setNoSpendDays(cached)
+      return
+    }
+    const { data, error } = await supabase.from("no_spend_days").select("*")
+    if (error) {
+      setError(error.message)
+      const cached = loadCache(session.user.id, 'no_spend_days')
+      if (cached) setNoSpendDays(cached)
+      return
+    }
+    setNoSpendDays(data)
+    saveCache(session.user.id, 'no_spend_days', data)
+  }
+
+  // Mark today as a no-spend day. Idempotent: keyed on (user_id, day) with an
+  // upsert, so a double-tap or a twice-replayed offline write collapses to one
+  // row. Guarded so it no-ops if today already has a transaction or a mark — the
+  // button shouldn't show then, but an offline same-day spend could race it.
+  async function markNoSpendToday() {
+    if (!canMarkNoSpend(transactions, noSpendDays.map((r) => r.day))) return
+    const day = dayKey(new Date())
+    await runWrite({
+      write: { table: 'no_spend_days', operation: 'upsert', payload: { user_id: uid(), day }, onConflict: 'user_id,day' },
+      optimistic: () => setNoSpendDays((prev) => (prev.some((r) => r.day === day) ? prev : [...prev, { user_id: uid(), day }])),
+      onSynced: () => fetchNoSpendDays(),
+    })
+  }
+
   // Record a debt payment: log it as an expense (which lowers the balance), then
   // update the debt by kind:
   //   recurring — drop one month, advance the due date
@@ -564,12 +601,14 @@ export default function App() {
       fetchDebts()
       fetchBudgetLimits()
       fetchLoans()
+      fetchNoSpendDays()
     } else {
       setTransactions([])
       setSalarySettings(null)
       setDebts([])
       setBudgetLimits([])
       setLoans([])
+      setNoSpendDays([])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId])
@@ -657,6 +696,7 @@ export default function App() {
         fetchDebts()
         fetchBudgetLimits()
         fetchLoans()
+        fetchNoSpendDays()
       } finally {
         flushing = false
       }
@@ -693,6 +733,7 @@ export default function App() {
       fetchDebts(),
       fetchBudgetLimits(),
       fetchLoans(),
+      fetchNoSpendDays(),
     ])
   }
 
@@ -701,7 +742,7 @@ export default function App() {
   // Still checking the session — show nothing rather than a flash of the login form.
   if (!authReady) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-900 text-gray-400">
+      <div className="flex min-h-dvh items-center justify-center bg-gray-900 text-gray-400">
         Loading…
       </div>
     )
@@ -717,7 +758,15 @@ export default function App() {
     switch (view) {
       case "dashboard":
         return (
-          <Dashboard transactions={transactions} debts={debts} budgetLimits={budgetLimits} loans={loans} salarySettings={salarySettings} />
+          <Dashboard
+            transactions={transactions}
+            debts={debts}
+            budgetLimits={budgetLimits}
+            loans={loans}
+            salarySettings={salarySettings}
+            noSpendDays={noSpendDays}
+            onMarkNoSpend={markNoSpendToday}
+          />
         )
       case "transactions":
         return (
@@ -725,6 +774,10 @@ export default function App() {
             transactions={transactions}
             loading={loading}
             categories={budgetLimits.map((b) => b.category)}
+            debts={debts}
+            loans={loans}
+            budgetLimits={budgetLimits}
+            salarySettings={salarySettings}
             onDelete={deleteTransaction}
             onUpdate={updateTransaction}
             onAddClick={() => setAddOpen(true)}
@@ -737,6 +790,9 @@ export default function App() {
             key={salarySettings?.updated_at ?? "new"}
             settings={salarySettings}
             transactions={transactions}
+            debts={debts}
+            loans={loans}
+            budgetLimits={budgetLimits}
             onSaveSettings={saveSalarySettings}
             onRecordSalary={recordSalary}
             onSkipPayday={skipPayday}
@@ -770,6 +826,14 @@ export default function App() {
             onRemoveCategory={removeBudgetCategory}
           />
         )
+      case "history":
+        return (
+          <History
+            transactions={transactions}
+            budgetLimits={budgetLimits}
+            salarySettings={salarySettings}
+          />
+        )
       case "lent":
         return (
           <LentMoney
@@ -786,7 +850,7 @@ export default function App() {
 
   // Logged in -> the sidebar + main content layout.
   return (
-    <div className="flex min-h-screen bg-gray-950">
+    <div className="flex min-h-dvh bg-gray-950">
       <Sidebar
         view={view}
         onChange={setView}
@@ -798,7 +862,7 @@ export default function App() {
         onToggleCollapsed={toggleSidebarCollapsed}
       />
 
-      <main ref={scrollRef} className="relative flex-1 overflow-y-auto">
+      <main ref={scrollRef} className="relative min-w-0 flex-1 overflow-y-auto">
         {/* Pull-to-refresh indicator — a spinner that follows the finger on
             mobile, then spins while data reloads. Hidden at rest (distance 0). */}
         {pullDistance > 0 && (
@@ -826,8 +890,8 @@ export default function App() {
             </span>
           </div>
         )}
-        <div className="p-6">
-        <div className="mx-auto">
+        <div className="p-6 pt-[max(1.5rem,env(safe-area-inset-top))]">
+        <div className="mx-auto w-full min-w-0 max-w-7xl">
           <div className="mb-6 flex items-center gap-3">
             {/* Mobile: open the slide-over. */}
             <button

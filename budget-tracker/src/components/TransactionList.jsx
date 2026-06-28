@@ -1,6 +1,9 @@
 import { useState } from "react"
 import { formatMoney, CURRENCY } from "../lib/format"
 import { categoryIcon, isDebtPayment, DEBT_CATEGORY } from "../lib/categories"
+import { isDateInPeriod } from "../lib/period"
+import { recentPeriods, periodKey, periodSummary } from "../lib/periodSummary"
+import PeriodRecap from "./PeriodRecap"
 
 // Group transactions by calendar day (newest first), labelling each group
 // "Today" / "Yesterday" / "15 Jun 2026". Transactions arrive newest-first already.
@@ -28,7 +31,16 @@ function dayLabel(date) {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
 }
 
-export default function TransactionList({ transactions, categories = [], onDelete, onUpdate }) {
+export default function TransactionList({
+  transactions,
+  categories = [],
+  debts = [],
+  loans = [],
+  budgetLimits = [],
+  salarySettings,
+  onDelete,
+  onUpdate,
+}) {
   if (transactions.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-gray-700 bg-gray-800/40 py-12 text-center">
@@ -38,40 +50,118 @@ export default function TransactionList({ transactions, categories = [], onDelet
     )
   }
 
-  const groups = groupByDay(transactions)
+  // Bucket transactions into pay periods (newest first). Anything older than the
+  // periods we enumerate (or before salary was set up) falls into an "Earlier"
+  // catch-all so nothing is ever hidden.
+  const periods = recentPeriods(salarySettings, new Date(), 12)
+  const buckets = periods.map((p) => ({ period: p, key: periodKey(p), items: [] }))
+  const earlier = []
+  for (const t of transactions) {
+    const d = new Date(t.created_at)
+    const bucket = buckets.find((b) => isDateInPeriod(d, b.period))
+    if (bucket) bucket.items.push(t)
+    else earlier.push(t)
+  }
+  const visible = buckets.filter((b) => b.items.length > 0)
 
   return (
-    <div className="space-y-5">
-      {groups.map((group) => {
-        // Net for the day, so you can see at a glance how a day went.
-        const net = group.items.reduce(
-          (s, t) => s + (t.type === "income" ? Number(t.amount) : -Number(t.amount)),
-          0
-        )
-        return (
-          <div key={group.key}>
-            <div className="mb-2 flex items-center justify-between px-1">
-              <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                {dayLabel(group.date)}
-              </span>
-              <span className={`text-xs font-medium ${net >= 0 ? "text-green-500/80" : "text-gray-500"}`}>
-                {net >= 0 ? "+" : "−"}{formatMoney(Math.abs(net))}
-              </span>
-            </div>
-            <ul className="space-y-2">
-              {group.items.map((t) => (
-                <TransactionRow
-                  key={t.id}
-                  tx={t}
-                  categories={categories}
-                  onDelete={onDelete}
-                  onUpdate={onUpdate}
-                />
-              ))}
-            </ul>
+    <div className="space-y-4">
+      {visible.map((b, i) => (
+        <PeriodGroup
+          key={b.key}
+          period={b.period}
+          items={b.items}
+          summary={periodSummary(b.items, debts, loans, budgetLimits, b.period)}
+          defaultOpen={i === 0} // current period open, past collapsed
+          categories={categories}
+          onDelete={onDelete}
+          onUpdate={onUpdate}
+        />
+      ))}
+      {earlier.length > 0 && (
+        <PeriodGroup
+          period={null}
+          items={earlier}
+          summary={null}
+          defaultOpen={false}
+          categories={categories}
+          onDelete={onDelete}
+          onUpdate={onUpdate}
+        />
+      )}
+    </div>
+  )
+}
+
+// One collapsible pay-period group: a header with the period label + recap, and
+// (when expanded) the period's transactions grouped by day. The current period
+// starts open; past periods start collapsed behind their recap — tap to expand.
+function PeriodGroup({ period, items, summary, defaultOpen, categories, onDelete, onUpdate }) {
+  const [open, setOpen] = useState(defaultOpen)
+  const dayGroups = groupByDay(items)
+
+  const title = period ? `${period.label} payday` : "Earlier"
+  const range = period
+    ? `${period.start.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${period.end.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
+    : `${items.length} transaction${items.length === 1 ? "" : "s"}`
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800/40">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-start justify-between gap-3 p-3 text-left hover:bg-gray-800/60"
+        aria-expanded={open}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-gray-100">{title}</span>
+            <span className="text-xs text-gray-500">{range}</span>
           </div>
-        )
-      })}
+          {summary && (
+            <div className="mt-1.5">
+              <PeriodRecap summary={summary} />
+            </div>
+          )}
+        </div>
+        <span className={`mt-1 shrink-0 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden>
+          ▼
+        </span>
+      </button>
+
+      {open && (
+        <div className="space-y-5 border-t border-gray-700 p-3">
+          {dayGroups.map((group) => {
+            // Net for the day, so you can see at a glance how a day went.
+            const net = group.items.reduce(
+              (s, t) => s + (t.type === "income" ? Number(t.amount) : -Number(t.amount)),
+              0
+            )
+            return (
+              <div key={group.key}>
+                <div className="mb-2 flex items-center justify-between px-1">
+                  <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {dayLabel(group.date)}
+                  </span>
+                  <span className={`text-xs font-medium ${net >= 0 ? "text-green-500/80" : "text-gray-500"}`}>
+                    {net >= 0 ? "+" : "−"}{formatMoney(Math.abs(net))}
+                  </span>
+                </div>
+                <ul className="space-y-2">
+                  {group.items.map((t) => (
+                    <TransactionRow
+                      key={t.id}
+                      tx={t}
+                      categories={categories}
+                      onDelete={onDelete}
+                      onUpdate={onUpdate}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

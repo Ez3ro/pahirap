@@ -32,7 +32,7 @@ export default function Sidebar({ view, onChange, email, onSignOut, open, onClos
         {/* Fixed-width inner panel: the <aside> animates its width to 0 on
             desktop collapse, and this panel keeps its size so the content slides
             out cleanly under overflow-hidden instead of reflowing mid-animation. */}
-        <div className="flex h-full w-64 flex-col p-4 md:w-56">
+        <div className="flex h-full w-64 flex-col p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] md:w-56">
         {/* Close button — mobile only */}
         <button
           onClick={onClose}

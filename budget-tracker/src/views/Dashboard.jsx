@@ -23,17 +23,25 @@ import {
 import { formatMoney, formatMoneyCompact, formatMonthYear } from "@/lib/format"
 import { summariseDebts, startOfDay, killOrder, payoffDate, formatMonthsLeft, isDueInWindow, summariseDebtsByType, debtType } from "@/lib/debts"
 import { categoryIcon, categoryColor, isDebtPayment } from "@/lib/categories"
-import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod } from "@/lib/period"
+import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod, fundedThisPeriod } from "@/lib/period"
 import { ringStats } from "@/lib/ring"
+import { spendingHistory } from "@/lib/history"
+import { periodSummary, periodKey, runwayStatus } from "@/lib/periodSummary"
+import { incomeForPeriod, buildBudgetPlan } from "@/lib/budgetPlan"
 import BudgetRing from "@/components/BudgetRing"
+import HistoryRings from "@/components/HistoryRings"
+import StreakCard from "@/components/StreakCard"
+import PeriodRecap from "@/components/PeriodRecap"
 
 // The stable list of all possible block IDs, in their default order.
-// Stats (Balance / Income / Expenses / Lent out) lead the dashboard.
-const DEFAULT_ORDER = ["stats", "budget", "debt", "kill-order"]
+// Stats (Balance / Income / Expenses / Lent out) lead the dashboard. Streaks sit
+// high so the habit features (and the No-spending-today button) are seen daily.
+const DEFAULT_ORDER = ["stats", "streaks", "budget", "history", "debt", "kill-order"]
 
 // Bump this when the default order changes in a way that should override a user's
 // previously-saved arrangement (the old localStorage key is then ignored once).
-const ORDER_KEY = "dashboard-order-v3"
+// v4: introduced the streaks + history blocks.
+const ORDER_KEY = "dashboard-order-v4"
 
 function loadOrder() {
   try {
@@ -49,7 +57,25 @@ function loadOrder() {
   return DEFAULT_ORDER
 }
 
-export default function Dashboard({ transactions, debts, budgetLimits = [], loans = [], salarySettings }) {
+// Has the payday recap for this period already been dismissed? Persisted in
+// localStorage so the banner shows once per new payday, not every visit.
+function readDismissed(key) {
+  try {
+    return localStorage.getItem(key) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeDismissed(key) {
+  try {
+    localStorage.setItem(key, "1")
+  } catch {
+    return // storage full / unavailable — dismissal just won't persist
+  }
+}
+
+export default function Dashboard({ transactions, debts, budgetLimits = [], loans = [], salarySettings, noSpendDays = [], onMarkNoSpend }) {
   const income   = transactions.filter((t) => t.type === "income").reduce((s, t) => s + Number(t.amount), 0)
   // Expenses here is true cash flow, so it INCLUDES debt payments (that money
   // really left your account). The budget/spending views below exclude them.
@@ -97,15 +123,18 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   }
   const spendingTotal = Object.values(spentByCat).reduce((s, v) => s + v, 0)
 
-  // Overall budget bar.
-  const totalBudget   = budgetLimits.reduce((s, b) => s + Number(b.monthly_limit), 0)
+  // Overall budget bar. Budgets are set MONTHLY; a month holds more than one
+  // paycheck, so this period is only funded its share (monthly ÷ paychecks). We
+  // compare period spend against the FUNDED amount, never the full monthly figure
+  // — that's the money this paycheck actually provides.
+  const totalBudget   = budgetLimits.reduce((s, b) => s + fundedThisPeriod(b.monthly_limit, b.cadence, salarySettings), 0)
   const isBudgetOver  = totalBudget > 0 && spendingTotal > totalBudget
   const budgetOverBy  = isBudgetOver ? spendingTotal - totalBudget : 0
   const budgetPct     = totalBudget > 0 ? Math.max(0, Math.round(((totalBudget - spendingTotal) / totalBudget) * 100)) : null
   const budgetIsGood  = budgetPct !== null && budgetPct > 30 && !isBudgetOver
-  // Per-category rows: only show categories that have a limit or spending this period.
+  // Per-category rows: funded-this-period limit vs this period's spend.
   const catRows = budgetLimits
-    .map((b) => ({ category: b.category, limit: Number(b.monthly_limit), spent: spentByCat[b.category] || 0 }))
+    .map((b) => ({ category: b.category, limit: fundedThisPeriod(b.monthly_limit, b.cadence, salarySettings), spent: spentByCat[b.category] || 0 }))
     .filter((r) => r.limit > 0 || r.spent > 0)
     .sort((a, b) => b.spent - a.spent)
 
@@ -130,6 +159,44 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   ]
   const ringTitle = RING_TFS.find((t) => t.key === ringTf)?.label ?? "Today"
 
+  // Spending-history rings (last 14 days / 8 weeks / 6 months), each window's
+  // spend vs its budgeted pace — the retrospective companion to the live ring.
+  const history = spendingHistory(transactions, budgetLimits, salarySettings, new Date(), { daily: 14, weekly: 8, monthly: 6 })
+
+  // Streak support: the no-spend marks as a Set of "YYYY-MM-DD" keys, and a
+  // closure that resolves a date to its pay period (StreakCard stays settings-
+  // agnostic). currentPeriod tolerates a null salarySettings (default paydays).
+  const noSpendKeys = new Set(noSpendDays.map((r) => r.day))
+  const periodFor = (d) => currentPeriod(d, salarySettings)
+
+  // Payday recap banner: once a new paycheck lands (i.e. a new period has begun),
+  // recap the period that just ended — but only if you actually got paid for the
+  // CURRENT period (the trigger is "I have the next paycheck") and that previous
+  // period had spending to report. Dismissed per-period via localStorage so it
+  // shows once per new payday, not every visit.
+  const prevPeriodStart = new Date(period.start.getFullYear(), period.start.getMonth(), period.start.getDate() - 1)
+  const prevPeriod = currentPeriod(prevPeriodStart, salarySettings)
+  const prevSummary = periodSummary(transactions, debts, loans, budgetLimits, prevPeriod)
+  // "Got the next paycheck" = income recorded inside the current period. Uses the
+  // same paid_for-aware period-income helper the budget waterfall uses.
+  const gotNextPaycheck = incomeForPeriod(transactions, period) > 0
+  // Runway: is this paycheck's cash on track to run out before the next payday?
+  // A warning only — the fixed budget stays put; this just flags the danger.
+  const runway = runwayStatus(transactions, debts, loans, period, today)
+
+  // True spare this paycheck — what's genuinely free after committed costs, your
+  // set budgets (reserved), and unbudgeted spend. Shown as a compact line under
+  // the budget ring. Can go negative (you've committed more than you've got).
+  const plan = buildBudgetPlan({ transactions, debts, budgetLimits, loans, period })
+
+  const recapKey = `payday-recap-dismissed-${periodKey(period)}`
+  const [recapDismissed, setRecapDismissed] = useState(() => readDismissed(recapKey))
+  const showRecap = gotNextPaycheck && !recapDismissed && (prevSummary.spent > 0 || prevSummary.income > 0)
+  function dismissRecap() {
+    writeDismissed(recapKey)
+    setRecapDismissed(true)
+  }
+
   // Block order — loaded from localStorage, falls back to DEFAULT_ORDER.
   const [blockOrder, setBlockOrder] = useState(loadOrder)
 
@@ -151,6 +218,10 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
     if (id === "kill-order") return debts.length > 0
     if (id === "debt")       return debts.length > 0
     if (id === "budget")     return totalBudget > 0 || spendingTotal > 0
+    if (id === "history")    return totalBudget > 0 || spendingTotal > 0
+    // streaks always shows (the tracking streak needs no budget); the under-
+    // budget half hides itself inside StreakCard when there's no budget.
+    if (id === "streaks")    return true
     // stats always shows
     return true
   })
@@ -367,6 +438,19 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                           {formatMoney(ring.poolRemaining)} of {formatMoney(ring.pool)} left this period
                         </p>
                       )}
+                      {/* True spare this paycheck — free cash after debt, lent,
+                          your set budgets and unbudgeted spend. One quiet line so
+                          it informs without cluttering. */}
+                      {plan.income > 0 && (
+                        <p
+                          className={`mt-1.5 border-t border-border/60 pt-1.5 text-[11px] ${plan.trueSpare >= 0 ? "text-emerald-400/90" : "text-amber-400/90"}`}
+                          title="Income − debt − lent − your set budgets − unbudgeted spend, for this paycheck"
+                        >
+                          {plan.trueSpare >= 0
+                            ? `${formatMoney(plan.trueSpare)} spare this paycheck`
+                            : `${formatMoney(-plan.trueSpare)} over this paycheck`}
+                        </p>
+                      )}
                     </div>
 
                     {/* Per-category allotment — collapsible */}
@@ -410,6 +494,46 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
           </div>
         )
 
+      case "streaks":
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle>Streaks</CardTitle>
+              <CardDescription className="text-xs">Keep showing up · keep within your pace</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <StreakCard
+                transactions={transactions}
+                budgetLimits={budgetLimits}
+                noSpendKeys={noSpendKeys}
+                periodFor={periodFor}
+                onMarkNoSpend={onMarkNoSpend}
+              />
+            </CardContent>
+          </Card>
+        )
+
+      case "history":
+        return (
+          <Card>
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle>Spending history</CardTitle>
+                <span className="text-xs text-muted-foreground">{periodLabel}</span>
+              </div>
+              <CardDescription className="text-xs">Each ring: spend vs budget pace</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <HistoryRings
+                daily={history.daily}
+                weekly={history.weekly}
+                monthly={history.monthly}
+                hasBudget={history.hasBudget}
+              />
+            </CardContent>
+          </Card>
+        )
+
       case "kill-order":
         return <DebtKillOrder debts={debts} today={today} />
 
@@ -419,6 +543,54 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   }
 
   return (
+    <div className="space-y-4">
+      {/* Runway warning: this paycheck's cash is on track to run out before the
+          next payday. A heads-up only — your fixed budget is unchanged. */}
+      {runway.hasIncome && (runway.willRunShort || runway.alreadyShort) && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-700/50 bg-amber-950/30 p-3 text-sm">
+          <span className="mt-0.5 shrink-0" aria-hidden>⚠️</span>
+          <div className="min-w-0">
+            {runway.alreadyShort ? (
+              <p className="text-amber-300">
+                This paycheck's cash is spent — <span className="font-semibold">{runway.daysLeft} day{runway.daysLeft === 1 ? "" : "s"}</span> still to go before payday.
+              </p>
+            ) : (
+              <p className="text-amber-300">
+                At your current pace ({formatMoney(runway.recentPerDay)}/day) you'll run out about{" "}
+                <span className="font-semibold">{runway.shortBy} day{runway.shortBy === 1 ? "" : "s"}</span> before payday.
+              </p>
+            )}
+            <p className="mt-0.5 text-xs text-amber-400/80">
+              {formatMoney(Math.max(0, runway.cashLeft))} left · aim for {formatMoney(Math.max(0, runway.safePerDay))}/day to stretch it to {paydayAnchor.replace("until payday · ", "")}.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* New-payday recap: how the period that just ended went. Dismissible. */}
+      {showRecap && (
+        <Card className="border-green-800/50 bg-green-950/20">
+          <CardHeader className="pb-2">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <CardTitle className="text-green-300">New paycheck — last period recap</CardTitle>
+                <CardDescription className="text-xs">{prevPeriod.label} payday · how it went</CardDescription>
+              </div>
+              <button
+                onClick={dismissRecap}
+                className="shrink-0 rounded-md p-1 text-gray-500 hover:bg-gray-800 hover:text-gray-200"
+                aria-label="Dismiss recap"
+              >
+                ✕
+              </button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <PeriodRecap summary={prevSummary} />
+          </CardContent>
+        </Card>
+      )}
+
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={visibleBlocks} strategy={verticalListSortingStrategy}>
         <div className="space-y-4">
@@ -430,6 +602,7 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
         </div>
       </SortableContext>
     </DndContext>
+    </div>
   )
 }
 

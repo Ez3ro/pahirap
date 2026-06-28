@@ -90,4 +90,26 @@ body {
   * {
     @apply border-border outline-ring/50;
   }
+
+  /* iOS Safari hardening. Safari is stricter than Chrome about flex/grid items'
+     default min-width:auto, which lets a wide child (a long unbroken number, a
+     truncate row) push its container past the viewport and break alignment.
+     These backstops keep the page from drifting sideways and let truncate clip. */
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  /* Inline SVGs (the rings) measured as block so iOS doesn't add the baseline
+     gap or mis-size them inside a centring flex column. */
+  svg {
+    display: block;
+  }
+
+  /* Card slots can always shrink, so truncate inside them clips instead of
+     stretching the card on iOS (belt-and-braces with the min-w-0 utilities). */
+  [data-slot="card-content"],
+  [data-slot="card-header"] {
+    min-width: 0;
+  }
 }

@@ -1,6 +1,9 @@
 import { useState } from "react"
 import { formatMoney, formatDateISO, CURRENCY } from "../lib/format"
 import { getMostRecentPayday, getNextPayday } from "../lib/salary"
+import { currentPeriod } from "../lib/period"
+import { periodSummary, recentPeriods, cumulativeSurplus } from "../lib/periodSummary"
+import PeriodRecap from "../components/PeriodRecap"
 
 // App remounts this component (via a `key`) whenever salary settings change,
 // so seeding the form inputs from props with useState is enough — no effect
@@ -8,6 +11,9 @@ import { getMostRecentPayday, getNextPayday } from "../lib/salary"
 export default function Income({
   settings,
   transactions,
+  debts = [],
+  loans = [],
+  budgetLimits = [],
   onSaveSettings,
   onRecordSalary,
   onSkipPayday,
@@ -238,36 +244,74 @@ export default function Income({
 
       {/* History: recorded paydays + skipped ones */}
       <div>
-        <h3 className="mb-3 font-semibold text-gray-300">Recorded paydays</h3>
+        <div className="mb-3 flex items-baseline justify-between">
+          <h3 className="font-semibold text-gray-300">Recorded paydays</h3>
+          {(() => {
+            // Total surplus KEPT across recent paychecks (income − debt − lent −
+            // actual spend), summed over the periods you were paid for.
+            const { total, periodsCounted } = cumulativeSurplus(
+              transactions, debts, loans, budgetLimits, recentPeriods(settings, today, 12)
+            )
+            if (periodsCounted === 0) return null
+            return (
+              <span className="text-xs text-gray-500" title="Sum of income − debt − lent − actual spend across recent paychecks">
+                Kept across {periodsCounted} paycheck{periodsCounted === 1 ? "" : "s"}:{" "}
+                <span className={`font-semibold ${total >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {formatMoney(total)}
+                </span>
+              </span>
+            )
+          })()}
+        </div>
         {history.length === 0 ? (
           <p className="text-sm text-gray-500">No salary recorded yet.</p>
         ) : (
           <ul className="space-y-2">
-            {history.map((entry) => (
-              <li
-                key={entry.key}
-                className="flex items-center justify-between rounded-lg border border-gray-700 bg-gray-800 p-3"
-              >
-                <span className="text-gray-300">{formatDateISO(entry.dateISO)}</span>
-                {entry.status === "recorded" ? (
-                  <span className="font-semibold text-green-500">
-                    +{formatMoney(entry.amount)}
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-3">
-                    <span className="text-sm text-gray-500">
-                      Didn't get paid · {formatMoney(0)}
-                    </span>
-                    <button
-                      onClick={() => onUnskipPayday(entry.dateISO)}
-                      className="text-xs text-blue-400 hover:underline"
-                    >
-                      Undo
-                    </button>
-                  </span>
-                )}
-              </li>
-            ))}
+            {history.map((entry) => {
+              // For a recorded payday, recap the period it opened (its date is the
+              // period start). Only show once the period has actually started.
+              let recap = null
+              if (entry.status === "recorded") {
+                const [y, mo, d] = entry.dateISO.split("-").map(Number)
+                const periodStart = new Date(y, mo - 1, d)
+                if (periodStart <= today) {
+                  const period = currentPeriod(periodStart, settings)
+                  recap = periodSummary(transactions, debts, loans, budgetLimits, period)
+                }
+              }
+              return (
+                <li
+                  key={entry.key}
+                  className="rounded-lg border border-gray-700 bg-gray-800 p-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-300">{formatDateISO(entry.dateISO)}</span>
+                    {entry.status === "recorded" ? (
+                      <span className="font-semibold text-green-500">
+                        +{formatMoney(entry.amount)}
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-3">
+                        <span className="text-sm text-gray-500">
+                          Didn't get paid · {formatMoney(0)}
+                        </span>
+                        <button
+                          onClick={() => onUnskipPayday(entry.dateISO)}
+                          className="text-xs text-blue-400 hover:underline"
+                        >
+                          Undo
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  {recap && (
+                    <div className="mt-2 border-t border-gray-700/60 pt-2">
+                      <PeriodRecap summary={recap} />
+                    </div>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
       </div>

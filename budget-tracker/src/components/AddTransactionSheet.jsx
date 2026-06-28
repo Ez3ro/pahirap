@@ -154,7 +154,7 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
         role="dialog"
         aria-modal="true"
         aria-label="Add transaction"
-        className={`fixed inset-x-0 bottom-0 z-50 mx-auto max-w-lg rounded-t-2xl border border-gray-700 bg-gray-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-2xl ${
+        className={`fixed inset-x-0 bottom-0 z-50 mx-auto max-w-lg transform-gpu rounded-t-2xl border border-gray-700 bg-gray-900 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-2xl will-change-transform ${
           // No transition while a finger is dragging (follow in real time);
           // transition on otherwise for the slide in/out + snap-back.
           dragging ? "" : "transition-transform duration-300 ease-out"
@@ -260,13 +260,13 @@ export default function AddTransactionSheet({ open, onClose, onAdd, categories =
 
           {/* Date — hidden behind a toggle; defaults to today */}
           {showDate ? (
-            <div className="mb-3 flex items-center gap-2">
+            <div className="mb-3 flex min-w-0 items-center gap-2">
               <input
                 type="date"
                 value={date}
                 max={today}
                 onChange={(e) => setDate(e.target.value)}
-                className={fieldClass}
+                className={`${fieldClass} min-w-0 appearance-none`}
               />
               <button
                 type="button"

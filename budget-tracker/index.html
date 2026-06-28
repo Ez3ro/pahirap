@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover is REQUIRED for env(safe-area-inset-*) to resolve to
+         anything but 0 on iOS. The status-bar-style below is black-translucent
+         (the web view draws under the notch/home-indicator), so without this the
+         FAB, bottom sheet and content would sit under the system UI. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Payday Budget Planner</title>
 
     <!-- PWA: makes the app installable to the home screen and themes the shell. -->
