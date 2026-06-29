@@ -804,6 +804,7 @@ export default function App() {
           <Debts
             debts={debts}
             loading={loading}
+            salarySettings={salarySettings}
             onAdd={addDebt}
             onDelete={deleteDebt}
             onPay={payDebt}

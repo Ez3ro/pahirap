@@ -15,10 +15,18 @@ import {
   advanceDue,
   isDueInWindow,
 } from "../lib/debts"
+import { currentPeriod, nextPaydayWindow } from "../lib/period"
 
-export default function Debts({ debts, loading, onAdd, onDelete, onPay, onUpdate }) {
+export default function Debts({ debts, loading, salarySettings, onAdd, onDelete, onPay, onUpdate }) {
   const today = new Date()
-  const summary = summariseDebts(debts, today)
+  // Scope "still due" to the run-up to the NEXT payday rather than the calendar
+  // month. The window runs from the period start through the next payday itself
+  // (period.end + 1 day, inclusive). That's the money you must set aside before
+  // you next get paid: a debt due on the 5th shows during the whole 20th→5th run
+  // (you budget for it now), not only on the 5th. It then rolls off once paid.
+  const period = currentPeriod(today, salarySettings)
+  const dueWindow = nextPaydayWindow(period)
+  const summary = summariseDebts(debts, today, dueWindow)
   const byType = summariseDebtsByType(debts)
   const [expandedId, setExpandedId] = useState(null)
 
@@ -51,7 +59,7 @@ export default function Debts({ debts, loading, onAdd, onDelete, onPay, onUpdate
 
       {/* Summary */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <SummaryCard label="Still due this month" value={summary.dueNow} highlight />
+        <SummaryCard label={`Still due (${period.label})`} value={summary.dueNow} highlight />
         <SummaryCard label="Recurring / month" value={summary.recurringTotal} />
         <SummaryCard label="Total still owed" value={summary.totalOwed} />
       </div>
@@ -77,6 +85,7 @@ export default function Debts({ debts, loading, onAdd, onDelete, onPay, onUpdate
           <RecurringGroup
             debts={recurring}
             today={today}
+            dueWindow={dueWindow}
             expandedId={expandedId}
             onToggle={toggleExpand}
             onPay={onPay}
@@ -303,7 +312,7 @@ function StrategySection({ debts, today, strategy, onChooseStrategy }) {
 
 // ─── Recurring debts ─────────────────────────────────────────────────────────
 
-function RecurringGroup({ debts, today, expandedId, onToggle, onPay, onDelete, onUpdate }) {
+function RecurringGroup({ debts, today, dueWindow, expandedId, onToggle, onPay, onDelete, onUpdate }) {
   if (debts.length === 0) return null
 
   // Group debts by their type, keeping DEBT_TYPES order and skipping empty types.
@@ -339,6 +348,7 @@ function RecurringGroup({ debts, today, expandedId, onToggle, onPay, onDelete, o
                     key={d.id}
                     debt={d}
                     today={today}
+                    dueWindow={dueWindow}
                     isExpanded={expandedId === d.id}
                     onToggle={onToggle}
                     onPay={onPay}
@@ -356,7 +366,7 @@ function RecurringGroup({ debts, today, expandedId, onToggle, onPay, onDelete, o
 }
 
 // A single recurring-debt row (collapsed summary + expandable detail).
-function RecurringRow({ debt: d, today, isExpanded, onToggle, onPay, onDelete, onUpdate }) {
+function RecurringRow({ debt: d, today, dueWindow, isExpanded, onToggle, onPay, onDelete, onUpdate }) {
   const status = debtStatus(d, today)
   const monthsLeft = Number(d.months_left) || 0
   const originalMonths = Number(d.original_months) || 0
@@ -364,10 +374,25 @@ function RecurringRow({ debt: d, today, isExpanded, onToggle, onPay, onDelete, o
   const paidPercent = originalMonths > 0 ? Math.round((monthsPaid / originalMonths) * 100) : null
   const finish = payoffDate(d, today)
 
+  // "Due soon" = a payment coming up in this pay-day run-up (on/before the next
+  // payday) that isn't overdue yet — so you set the money aside now rather than
+  // being surprised on the due date. Once the due date passes it's `isLate`
+  // instead, and a late fee may apply, which we call out explicitly.
+  const dueSoon =
+    !status.paidOff &&
+    !status.isLate &&
+    status.nextDue &&
+    dueWindow &&
+    status.nextDue <= dueWindow.end
+
   return (
     <li
       className={`rounded-lg border ${
-        status.isLate ? "border-red-800 bg-red-950/50" : "border-gray-700 bg-gray-800"
+        status.isLate
+          ? "border-red-800 bg-red-950/50"
+          : dueSoon
+          ? "border-amber-800/70 bg-amber-950/20"
+          : "border-gray-700 bg-gray-800"
       }`}
     >
       {/* Row */}
@@ -386,6 +411,8 @@ function RecurringRow({ debt: d, today, isExpanded, onToggle, onPay, onDelete, o
               <Badge tone="red">
                 {status.overdue} month{status.overdue === 1 ? "" : "s"} late
               </Badge>
+            ) : dueSoon ? (
+              <Badge tone="amber">Due {formatDateISO(d.next_due_date)}</Badge>
             ) : null}
           </div>
           <p className="text-xs text-gray-400">
@@ -393,6 +420,17 @@ function RecurringRow({ debt: d, today, isExpanded, onToggle, onPay, onDelete, o
             {monthsLeft > 0 && ` · ${formatMonthsLeft(monthsLeft)}`}
             {status.nextDue && ` · next ${formatDateISO(d.next_due_date)}`}
           </p>
+          {/* Late-fee call-out: once past the due date, paying late usually incurs
+              a fee, so make the risk explicit rather than just colouring the row. */}
+          {status.isLate ? (
+            <p className="mt-0.5 text-xs font-medium text-red-400">
+              ⚠️ Overdue — a late fee may apply. Pay as soon as you can.
+            </p>
+          ) : dueSoon ? (
+            <p className="mt-0.5 text-xs text-amber-400">
+              Set this aside before payday to avoid a late fee.
+            </p>
+          ) : null}
         </div>
 
         <div className="ml-3 flex shrink-0 items-center gap-2">
@@ -851,6 +889,7 @@ function Badge({ tone, children }) {
   const tones = {
     red: "bg-red-500/20 text-red-400",
     green: "bg-green-500/20 text-green-400",
+    amber: "bg-amber-500/20 text-amber-400",
   }
   return (
     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tones[tone]}`}>

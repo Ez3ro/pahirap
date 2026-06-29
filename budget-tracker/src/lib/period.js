@@ -82,6 +82,18 @@ export function currentPeriod(today, settings) {
   }
 }
 
+// The window used for "what debt do I owe before my next paycheck?" — the period
+// start through the next payday itself (one day past period.end), inclusive. Debt
+// is anchored to its DUE DATE, but the money has to be ready BY payday, so a debt
+// due on the next payday (e.g. the 5th) must show during the whole run-up to it,
+// not only on the day. Returns a { start, end, label } shaped like a period, so it
+// drops straight into summariseDebts / isDueInWindow. The label keeps the period's
+// own (e.g. "20th → 5th") since the next payday is the period's closing boundary.
+export function nextPaydayWindow(period) {
+  const end = new Date(period.end.getFullYear(), period.end.getMonth(), period.end.getDate() + 1)
+  return { start: period.start, end, label: period.label }
+}
+
 // 1 -> "1st", 2 -> "2nd", 20 -> "20th", etc.
 function ordinal(n) {
   const s = ["th", "st", "nd", "rd"]

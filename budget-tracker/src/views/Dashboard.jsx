@@ -23,7 +23,7 @@ import {
 import { formatMoney, formatMoneyCompact, formatMonthYear } from "@/lib/format"
 import { summariseDebts, startOfDay, killOrder, payoffDate, formatMonthsLeft, isDueInWindow, summariseDebtsByType, debtType } from "@/lib/debts"
 import { categoryIcon, categoryColor, isDebtPayment } from "@/lib/categories"
-import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod, fundedThisPeriod } from "@/lib/period"
+import { currentPeriod, isDateInPeriod, daysRemaining, daysInPeriod, fundedThisPeriod, nextPaydayWindow } from "@/lib/period"
 import { ringStats } from "@/lib/ring"
 import { spendingHistory } from "@/lib/history"
 import { periodSummary, periodKey, runwayStatus } from "@/lib/periodSummary"
@@ -94,22 +94,28 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   // debt summary's "due now" is scoped to this same window, so a debt you've
   // already paid drops out of the figure instead of always showing its full amount.
   const period = currentPeriod(today, salarySettings)
-  const debtSummary = summariseDebts(debts, today, period)
+  // Debt "due now" looks ahead to the NEXT payday (period through payday itself),
+  // not just the period's last day — money for a debt due on the next payday (the
+  // 5th) must be set aside during the whole run-up to it. Shared with the Debts view.
+  const dueWindow = nextPaydayWindow(period)
+  const debtSummary = summariseDebts(debts, today, dueWindow)
   // Per-type monthly breakdown (Cards ₱X, Car ₱Y, …) for the Debt overview card.
   const debtByType = summariseDebtsByType(debts)
   const periodLabel = `${period.label} payday`
   // The next payday is the day after the period ends. Everything in the ring is
   // paced toward this date, so "this week" reads as a week in the run-up to payday
   // rather than a calendar/month week.
-  const nextPayday = new Date(period.end.getFullYear(), period.end.getMonth(), period.end.getDate() + 1)
+  const nextPayday = dueWindow.end
   const daysToPayday = daysRemaining(period, today)
   const paydayAnchor = `until payday · ${nextPayday.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} (${daysToPayday}d)`
 
-  // Recurring debt still due in this pay-day period (and not yet paid).
+  // Recurring debt still due before the next payday (and not yet paid) — same
+  // run-up-to-payday window as the figures above, so a debt due on the next
+  // payday is counted now rather than only on the day.
   let dueThisPeriod = 0
   for (const d of debts) {
     if (d.kind !== "recurring") continue
-    if (isDueInWindow(d, period.start, period.end)) dueThisPeriod += Number(d.amount) || 0
+    if (isDueInWindow(d, dueWindow.start, dueWindow.end)) dueThisPeriod += Number(d.amount) || 0
   }
 
   // Spending by category this period — debt payments excluded so they don't show
