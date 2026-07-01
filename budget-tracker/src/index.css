@@ -14,6 +14,226 @@ body {
   margin: 0;
 }
 
+/* Flame border — a live streak card edged in moving fire. Cross-browser approach
+   that works on iOS/Safari (which don't reliably animate an @property <angle>):
+   rotation is a plain `transform: rotate()`, universally supported.
+   Structure (set in StreakCard):
+     .flame-border            → the card; positioned, holds the flickering glow
+       .flame-border__fire    → an absolutely-positioned overlay that carries the
+                                ring MASK; its ::before is the rotating gradient
+       …card content…         → a SIBLING of the fire layer, so the mask never
+                                clips the actual text/children
+   The fire layer is masked to a thin edge band; inside it an oversized conic
+   gradient rotates about its centre, always covering the card, and the mask keeps
+   the colour confined to the rim so nothing spills onto the page. */
+.flame-border {
+  position: relative;
+  border-color: transparent;
+  animation: flame-glow 0.5s ease-in-out infinite alternate;
+}
+
+.flame-border__fire {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;                 /* ring thickness — the mask reveals only this band */
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+  /* Punch out the centre → only the padding band shows. WebKit uses `xor` where the
+     standard uses `exclude`; both are declared so Safari and everything else agree. */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.flame-border__fire::before {
+  content: "";
+  position: absolute;
+  /* Oversized square centred on the layer; rotating about its middle keeps the card
+     fully covered at every angle (150% comfortably exceeds the diagonal). */
+  width: 150%;
+  aspect-ratio: 1;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  background: conic-gradient(
+    #fde047, #fb923c, #ef4444, #f97316, #fbbf24, #ef4444, #fb923c, #fde047
+  );
+  animation: flame-rotate 3.2s linear infinite;
+}
+
+/* Rotation — a plain transform, supported everywhere. */
+@keyframes flame-rotate {
+  to { transform: rotate(360deg); }
+}
+
+/* Warm flickering glow on the card itself so the rim dances rather than merely spins. */
+@keyframes flame-glow {
+  0%   { box-shadow: 0 0 4px rgba(249,115,22,0.55); }
+  50%  { box-shadow: 0 0 8px rgba(251,146,60,0.75); }
+  100% { box-shadow: 0 0 12px rgba(253,186,116,0.7); }
+}
+
+/* Reduced motion: a warm static fiery rim, no movement. */
+@media (prefers-reduced-motion: reduce) {
+  .flame-border { animation: none; box-shadow: 0 0 8px rgba(249, 115, 22, 0.5); }
+  .flame-border__fire::before { animation: none; }
+}
+
+/* Inferno tier (20+ days): thicker band, faster rotation, stronger/faster glow. */
+.flame-border--intense { animation: flame-glow-intense 0.35s ease-in-out infinite alternate; }
+.flame-border--intense .flame-border__fire { padding: 3.5px; }
+.flame-border--intense .flame-border__fire::before { animation: flame-rotate 1.6s linear infinite; }
+
+@keyframes flame-glow-intense {
+  0%   { box-shadow: 0 0 8px rgba(249,115,22,0.75); }
+  50%  { box-shadow: 0 0 16px rgba(251,146,60,0.95); }
+  100% { box-shadow: 0 0 22px rgba(253,186,116,0.95); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flame-border--intense { animation: none; box-shadow: 0 0 12px rgba(249, 115, 22, 0.6); }
+}
+
+/* CSS flame — a pure-CSS dancing flame drawn instead of the 🔥 emoji, shown on a
+   hot (10+ day) tracking streak. The outer teardrop is the orange body; an inner
+   teardrop is the bright yellow core. Both are the classic "three rounded corners
+   + one sharp top" shape (border-radius with a sharp top-left) rotated 45° so the
+   point faces up. The whole flame bobs and sways from its base, and the body
+   brightness flickers on an offset rhythm so it dances rather than pulses evenly. */
+.css-flame {
+  position: relative;
+  display: inline-block;
+  width: 0.85em;
+  height: 0.95em;
+  transform-origin: 50% 90%;
+  animation: flame-bob 1.1s ease-in-out infinite;
+}
+
+/* Flame body (orange) and core (yellow) share the teardrop shape; the core is
+   smaller and sits low, like the hot centre of a flame. */
+.css-flame::before,
+.css-flame::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  border-radius: 0 50% 50% 50%;     /* sharp top-left corner = the flame's point */
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.css-flame::before {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(to top, #f97316 0%, #fb923c 45%, #fbbf24 100%);
+  box-shadow: 0 0 6px rgba(251, 146, 60, 0.8);
+  animation: flame-flicker-body 0.5s ease-in-out infinite alternate;
+}
+
+.css-flame::after {
+  width: 55%;
+  height: 55%;
+  background: linear-gradient(to top, #fde047 0%, #fef9c3 100%);
+  animation: flame-flicker-core 0.4s ease-in-out infinite alternate;
+}
+
+@keyframes flame-bob {
+  0%, 100% { transform: translateY(0)    rotate(-4deg) scale(1);    }
+  30%      { transform: translateY(-2px) rotate(3deg)  scale(1.06); }
+  60%      { transform: translateY(-1px) rotate(-2deg) scale(1.02); }
+}
+
+@keyframes flame-flicker-body {
+  from { filter: brightness(1);    box-shadow: 0 0 5px rgba(251, 146, 60, 0.7); }
+  to   { filter: brightness(1.25); box-shadow: 0 0 9px rgba(251, 146, 60, 0.95); }
+}
+
+@keyframes flame-flicker-core {
+  from { transform: translateX(-50%) rotate(45deg) scaleY(1);    opacity: 0.9; }
+  to   { transform: translateX(-50%) rotate(45deg) scaleY(1.15); opacity: 1;   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .css-flame,
+  .css-flame::before,
+  .css-flame::after {
+    animation: none;
+  }
+}
+
+/* Inferno flame (20+ days): bigger, faster, wilder. Larger glyph, a quicker and
+   taller bob, and faster body/core flicker so it thrashes like a roaring flame. */
+.css-flame--intense {
+  width: 1.05em;
+  height: 1.25em;
+  animation: flame-bob-intense 0.7s ease-in-out infinite;
+}
+
+.css-flame--intense::before {
+  box-shadow: 0 0 10px rgba(251, 146, 60, 0.95);
+  animation: flame-flicker-body-intense 0.28s ease-in-out infinite alternate;
+}
+
+.css-flame--intense::after {
+  animation: flame-flicker-core 0.22s ease-in-out infinite alternate;
+}
+
+@keyframes flame-bob-intense {
+  0%, 100% { transform: translateY(0)    rotate(-7deg) scale(1);    }
+  30%      { transform: translateY(-4px) rotate(6deg)  scale(1.14); }
+  60%      { transform: translateY(-2px) rotate(-4deg) scale(1.05); }
+}
+
+@keyframes flame-flicker-body-intense {
+  from { filter: brightness(1.05); box-shadow: 0 0 8px rgba(251, 146, 60, 0.85); }
+  to   { filter: brightness(1.5);  box-shadow: 0 0 16px rgba(253, 186, 116, 1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .css-flame--intense {
+    animation: none;
+  }
+}
+
+/* Budget bar laser sweep — a subtle highlight that drifts across the green
+   remaining-budget bar once every few seconds (applied via .bar-laser in the
+   Dashboard budget bar). */
+@keyframes laser-sweep {
+  0%   { transform: translateX(-100%); opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { transform: translateX(400%); opacity: 0; }
+}
+
+.bar-laser {
+  position: relative;
+  overflow: hidden;
+}
+
+.bar-laser::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 25%;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.28) 50%, transparent 100%);
+  animation: laser-sweep 4s ease-in-out infinite;
+  animation-delay: 2s;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-laser::after {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 /* ---- shadcn/ui design tokens ----
    Components reference semantic colours (bg-card, text-muted-foreground, etc.)
    rather than fixed greys. These variables define the palette; @theme inline

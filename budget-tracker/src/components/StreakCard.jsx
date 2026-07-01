@@ -39,6 +39,7 @@ export default function StreakCard({
         longest={data.tracking.longest}
         note="days logged or marked"
         tone="text-orange-400"
+        fireAt={[10, 20]}
       />
       {data.hasBudget ? (
         <StreakStat
@@ -75,21 +76,50 @@ export default function StreakCard({
 }
 
 // One streak counter: big current run, with the personal best beneath.
-function StreakStat({ icon, label, current, longest, note, tone }) {
+//
+// `fireAt` is an optional [hot, inferno] day-threshold pair that lights the card up
+// in tiers as the streak grows:
+//   < hot      — plain card, static emoji
+//   ≥ hot       — flame border + a pure-CSS dancing flame icon
+//   ≥ inferno   — the same, intensified: thicker/faster fiery ring + a bigger,
+//                 wilder flame ("bigger, faster, intense")
+function StreakStat({ icon, label, current, longest, note, tone, fireAt }) {
+  const [hot, inferno] = fireAt ?? [Infinity, Infinity]
+  const isInferno = current >= inferno
+  const isHot = current >= hot
+  const borderClass = isInferno
+    ? "flame-border flame-border--intense"
+    : isHot
+    ? "flame-border"
+    : "border-border"
+
   return (
-    <div className="rounded-xl border border-border bg-card p-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xl" aria-hidden>{icon}</span>
-        <span className="text-sm font-medium text-muted-foreground">{label}</span>
+    <div className={`relative rounded-xl border bg-card p-4 ${borderClass}`}>
+      {/* Rotating-fire ring overlay — a sibling of the content so the ring's mask
+          never clips the text. The content below sits above it via relative z-index. */}
+      {isHot && <span className="flame-border__fire" aria-hidden />}
+      <div className="relative z-[1]">
+        <div className="flex items-center gap-2">
+          {isHot ? (
+            <span
+              className={`css-flame text-xl ${isInferno ? "css-flame--intense" : ""}`}
+              role="img"
+              aria-label="on fire"
+            />
+          ) : (
+            <span className="text-xl" aria-hidden>{icon}</span>
+          )}
+          <span className="text-sm font-medium text-muted-foreground">{label}</span>
+        </div>
+        <p className={`mt-2 text-3xl font-bold ${tone}`}>
+          {current}
+          <span className="ml-1.5 text-base font-medium text-muted-foreground">
+            day{current === 1 ? "" : "s"}
+          </span>
+        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>
+        <p className="mt-1 text-[11px] text-gray-500">Best: {longest} day{longest === 1 ? "" : "s"}</p>
       </div>
-      <p className={`mt-2 text-3xl font-bold ${tone}`}>
-        {current}
-        <span className="ml-1.5 text-base font-medium text-muted-foreground">
-          day{current === 1 ? "" : "s"}
-        </span>
-      </p>
-      <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>
-      <p className="mt-1 text-[11px] text-gray-500">Best: {longest} day{longest === 1 ? "" : "s"}</p>
     </div>
   )
 }

@@ -109,14 +109,18 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
   const daysToPayday = daysRemaining(period, today)
   const paydayAnchor = `until payday · ${nextPayday.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} (${daysToPayday}d)`
 
-  // Recurring debt still due before the next payday (and not yet paid) — same
-  // run-up-to-payday window as the figures above, so a debt due on the next
-  // payday is counted now rather than only on the day.
-  let dueThisPeriod = 0
-  for (const d of debts) {
-    if (d.kind !== "recurring") continue
-    if (isDueInWindow(d, dueWindow.start, dueWindow.end)) dueThisPeriod += Number(d.amount) || 0
-  }
+  // Every debt — recurring, lump sum, or credit card — still due before the next
+  // payday (and not yet paid), using the same run-up-to-payday window as the
+  // figures above so a debt due on the next payday is counted now rather than only
+  // on the day. isDueInWindow knows each kind's rules; the amount due is the
+  // monthly/minimum payment (`amount`) for recurring + cards, the amount itself for
+  // a lump sum (same `amount` field). Collected as a list so the card can break
+  // the total down, and this now matches the Debts page's "Still due" figure.
+  const dueThisPeriodItems = debts
+    .filter((d) => isDueInWindow(d, dueWindow.start, dueWindow.end))
+    .map((d) => ({ id: d.id, name: d.name, amount: Number(d.amount) || 0 }))
+    .sort((a, b) => b.amount - a.amount)
+  const dueThisPeriod = dueThisPeriodItems.reduce((s, d) => s + d.amount, 0)
 
   // Spending by category this period — debt payments excluded so they don't show
   // up as discretionary spending (they're tracked on the Debts page instead).
@@ -197,7 +201,13 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
 
   const recapKey = `payday-recap-dismissed-${periodKey(period)}`
   const [recapDismissed, setRecapDismissed] = useState(() => readDismissed(recapKey))
-  const showRecap = gotNextPaycheck && !recapDismissed && (prevSummary.spent > 0 || prevSummary.income > 0)
+  // Only surface the recap while the new paycheck is still fresh — the first few
+  // days of the current period. daysElapsed is 1 on payday, 2 the next day, etc.
+  // Without this the recap of a period that ended could keep showing up to ~2 weeks
+  // into the next one (income recorded anywhere in the current window trips it).
+  const RECAP_FRESH_DAYS = 3
+  const recapIsFresh = daysElapsed <= RECAP_FRESH_DAYS
+  const showRecap = gotNextPaycheck && recapIsFresh && !recapDismissed && (prevSummary.spent > 0 || prevSummary.income > 0)
   function dismissRecap() {
     writeDismissed(recapKey)
     setRecapDismissed(true)
@@ -290,18 +300,28 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
             </Card>
             {dueThisPeriod > 0 ? (
               <Card
-                className="border-red-700/40 bg-red-950/20"
-                style={{ boxShadow: "0 0 18px rgba(255,14,14,0.46)" }}
+                className="border-red-500/60 bg-red-900/25"
+                style={{ boxShadow: "0 0 22px rgba(248,113,113,0.40)" }}
               >
                 <CardHeader>
-                  <CardTitle className="text-red-500">Due this period</CardTitle>
-                  <CardDescription className="text-red-500/70">{periodLabel}</CardDescription>
+                  <CardTitle className="text-red-300">Due this period</CardTitle>
+                  <CardDescription className="text-red-400/80">{periodLabel}</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <p className="max-w-full truncate text-2xl font-semibold text-red-200" title={formatMoney(dueThisPeriod)}>{formatMoneyCompact(dueThisPeriod)}</p>
-                  <p className="mt-1 text-xs text-red-500">
-                    Recurring debts due before the next payday
+                  <p className="max-w-full truncate text-2xl font-semibold text-red-100" title={formatMoney(dueThisPeriod)}>{formatMoneyCompact(dueThisPeriod)}</p>
+                  <p className="mt-1 text-xs text-red-300/90">
+                    {dueThisPeriodItems.length} debt{dueThisPeriodItems.length === 1 ? "" : "s"} due before the next payday
                   </p>
+                  {/* Breakdown of what makes up the total — one line per debt, so the
+                      figure is auditable at a glance. Scrolls past ~5 rows. */}
+                  <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto border-t border-red-500/30 pt-2 pr-1">
+                    {dueThisPeriodItems.map((d) => (
+                      <div key={d.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="min-w-0 flex-1 truncate text-red-100/90">{d.name}</span>
+                        <span className="shrink-0 whitespace-nowrap font-medium text-red-50" title={formatMoney(d.amount)}>{formatMoney(d.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
                 </CardContent>
               </Card>
             ) : (
@@ -558,7 +578,9 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
           <div className="min-w-0">
             {runway.alreadyShort ? (
               <p className="text-amber-300">
-                This paycheck's cash is spent — <span className="font-semibold">{runway.daysLeft} day{runway.daysLeft === 1 ? "" : "s"}</span> still to go before payday.
+                {runway.cashLeft < 0
+                  ? <>You're <span className="font-semibold">{formatMoney(-runway.cashLeft)}</span> past this paycheck — <span className="font-semibold">{runway.daysLeft} day{runway.daysLeft === 1 ? "" : "s"}</span> still to go before payday.</>
+                  : <>This paycheck's cash is spent — <span className="font-semibold">{runway.daysLeft} day{runway.daysLeft === 1 ? "" : "s"}</span> still to go before payday.</>}
               </p>
             ) : (
               <p className="text-amber-300">
@@ -566,9 +588,17 @@ export default function Dashboard({ transactions, debts, budgetLimits = [], loan
                 <span className="font-semibold">{runway.shortBy} day{runway.shortBy === 1 ? "" : "s"}</span> before payday.
               </p>
             )}
-            <p className="mt-0.5 text-xs text-amber-400/80">
-              {formatMoney(Math.max(0, runway.cashLeft))} left · aim for {formatMoney(Math.max(0, runway.safePerDay))}/day to stretch it to {paydayAnchor.replace("until payday · ", "")}.
-            </p>
+            {runway.alreadyShort ? (
+              // No "stretch ₱X/day" advice here — there's nothing left to stretch.
+              // Point at the only levers that help: bring money in, or hold off.
+              <p className="mt-0.5 text-xs text-amber-400/80">
+                Time to make some money 💪 — pick up extra work or log any income coming in, and put non-essentials on pause until {paydayAnchor.replace("until payday · ", "")}.
+              </p>
+            ) : (
+              <p className="mt-0.5 text-xs text-amber-400/80">
+                {formatMoney(Math.max(0, runway.cashLeft))} left · aim for {formatMoney(Math.max(0, runway.safePerDay))}/day to stretch it to {paydayAnchor.replace("until payday · ", "")}.
+              </p>
+            )}
           </div>
         </div>
       )}

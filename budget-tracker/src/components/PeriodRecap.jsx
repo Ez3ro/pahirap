@@ -37,11 +37,14 @@ export default function PeriodRecap({ summary, compact = false }) {
         </p>
       )}
 
-      {/* Budget lens */}
+      {/* Budget lens. Note "spent" here is DISCRETIONARY spend only — debt payments
+          and money lent out are excluded (they're their own lines in the cash
+          breakdown below), matching how the budget rings work. Labelled explicitly
+          so a small figure next to a big budget doesn't read as "I only spent ₱30". */}
       {hasBudget ? (
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
           <span className="text-muted-foreground">
-            Spent <span className="font-semibold text-gray-200" title={formatMoney(spent)}>{formatMoney(spent)}</span>
+            Budget spend <span className="font-semibold text-gray-200" title={formatMoney(spent)}>{formatMoney(spent)}</span>
             {" "}of {formatMoney(budget)}
           </span>
           <span className={`font-semibold ${isOverBudget ? "text-red-400" : "text-green-400"}`}>
@@ -53,9 +56,14 @@ export default function PeriodRecap({ summary, compact = false }) {
         </div>
       ) : (
         <div className="text-xs text-muted-foreground">
-          Spent <span className="font-semibold text-gray-200">{formatMoney(spent)}</span>
+          Budget spend <span className="font-semibold text-gray-200">{formatMoney(spent)}</span>
           {" "}· {formatMoney(spentPerDay)}/day over {days} day{days === 1 ? "" : "s"}
         </div>
+      )}
+      {(debtPaid > 0 || lentOut > 0) && (
+        <p className="text-[11px] text-muted-foreground/80">
+          Budget spend is day-to-day only — debt{lentOut > 0 ? " and lent money" : ""} shown separately below.
+        </p>
       )}
 
       {/* Cash-lens breakdown — the arithmetic behind the "kept" headline above. */}
